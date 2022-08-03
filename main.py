@@ -76,7 +76,7 @@ def main():
         print(transformed_model.code)
 
     # test forward
-    texts = ["Hello my name is", "I love this"]
+    texts = ["Hello my name is", "I love this", " ".join(["Hello my name is"] * 32)]
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     input_ids = tokenizer.batch_encode_plus(texts, return_tensors="pt", padding=True)
 
@@ -91,6 +91,14 @@ def main():
 
     with torch.no_grad():
         results = transformed_model(**input_ids)
+
+        # Test consistency across ranks
+        logits_from_tp_ranks = [torch.empty_like(results["logits"]) for _ in range(tp_world_size)]
+        torch.distributed.all_gather(logits_from_tp_ranks, results["logits"], group=process_group)
+        if tp_rank == 0:
+            master_rank_logits = logits_from_tp_ranks[0]
+            for other_logits in logits_from_tp_ranks:
+                torch.testing.assert_close(master_rank_logits, other_logits)
 
         if tp_rank == 0:
             # we compare results with TP=1 model
