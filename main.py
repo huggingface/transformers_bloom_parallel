@@ -72,7 +72,8 @@ def main():
     transformation = compose(tp_transformation, alibi_tp_transformation)
 
     transformed_model = transformation(traced)
-    print(transformed_model.code)
+    if tp_rank == 0:
+        print(transformed_model.code)
 
     # test forward
     texts = ["Hello my name is", "I love this"]
@@ -83,7 +84,7 @@ def main():
     if torch.cuda.is_available():
         model.cuda()
         transformed_model.cuda()
-        input_ids.cuda()
+        input_ids.to("cuda")
 
     model.eval()
     transformed_model.eval()
