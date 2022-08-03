@@ -19,10 +19,16 @@ def initialize_torch_distributed():
     rank = int(os.getenv('RANK', '0'))
     world_size = int(os.getenv("WORLD_SIZE", '1'))
 
-    # # initialized `torch.distributed`
-    # # Set the device id.
-    # device = rank % torch.cuda.device_count()
-    # torch.cuda.set_device(device)
+    if torch.cuda.is_available():
+        # initialized `torch.distributed`
+        # Set the device id.
+        assert world_size <= torch.cuda.device_count(), "Each process is one gpu"
+        device = rank % torch.cuda.device_count()
+        torch.cuda.set_device(device)
+        backend = "nccl"
+    else:
+        backend = "gloo"
+
 
     # Call the init process.
     init_method = 'tcp://'
@@ -30,7 +36,7 @@ def initialize_torch_distributed():
     master_port = os.getenv('MASTER_PORT', '6000')
     init_method += master_ip + ':' + master_port
     process_group = torch.distributed.init_process_group(
-        backend="gloo",
+        backend=backend,
         world_size=world_size,
         rank=rank,
         init_method=init_method)
@@ -73,8 +79,15 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     input_ids = tokenizer.batch_encode_plus(texts, return_tensors="pt", padding=True)
 
+    # Move everything to cuda if possible
+    if torch.cuda.is_available():
+        model.cuda()
+        transformed_model.cuda()
+        input_ids.cuda()
+
     model.eval()
     transformed_model.eval()
+
     with torch.no_grad():
         results = transformed_model(**input_ids)
 
