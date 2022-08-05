@@ -69,7 +69,7 @@ class TensorParallelShardedLogitsProcessor(LogitsProcessor):
 
 def main():
     shard_directory = "/home/thomas_wang_huggingface_co/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
-    model_name = "bigscience/bloom"
+    model_name = "bigscience/bigscience-small-testing" #"bigscience/bloom"
     dtype = torch.bfloat16
     max_length = 50
 
@@ -93,7 +93,7 @@ def main():
     torch.distributed.broadcast_object_list(shard_state_dict_paths, src=0, group=process_group)
     shard_state_dict_path = shard_state_dict_paths[tp_rank]
 
-    config = AutoConfig.from_pretrained(model_name, tp_parallel=True)
+    config = AutoConfig.from_pretrained(model_name, slow_but_exact=False, tp_parallel=True)
 
     if torch.cuda.is_available():
         device="cuda"
@@ -132,7 +132,10 @@ def main():
         # Broadcast input to every ranks
         num_text_segment = torch.tensor(len(texts), device=device, dtype=torch.long)
         torch.distributed.broadcast(num_text_segment, src=0)
-        if tp_rank !=0:
+        # Early return if texts is empty
+        if num_text_segment == 0:
+            continue
+        if tp_rank != 0:
             texts = [None] * num_text_segment
         torch.distributed.broadcast_object_list(texts, src=0, group=process_group)
 
