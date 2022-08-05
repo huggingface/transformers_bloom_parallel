@@ -11,7 +11,7 @@ from torch.profiler import profile, tensorboard_trace_handler
 from transformers import AutoTokenizer, AutoModelForCausalLM, LogitsProcessor, AutoConfig, LogitsProcessorList
 from transformers.modeling_utils import no_init_weights
 
-from dirty_tp.shard_model import shard_model
+from .shard_model import shard_model
 
 
 def initialize_torch_distributed():
