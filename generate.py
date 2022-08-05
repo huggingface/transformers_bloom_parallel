@@ -132,7 +132,7 @@ def main():
         text = "\n".join(texts)
 
         # getting generation
-        input_ids = tokenizer(text, return_tensors='pt').to(device)
+        input_ids = tokenizer.encode(text, return_tensors='pt').to(device)
 
         # Greedy generation
         greedy_output = model.generate(
