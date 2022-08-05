@@ -25,6 +25,7 @@ def shard_model(model_name: str, path: Path, tp_world_size: int):
     state_dict = model.state_dict()
     keys = list(state_dict.keys())
     for state_name in keys:
+        print(state_name)
         state = state_dict[state_name]
         if any(match_suffix(state_name, candidate) for candidate in [
             "self_attention.query_key_value.weight",

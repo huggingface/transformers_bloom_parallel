@@ -82,18 +82,21 @@ def main():
     shard_state_dict_path = shard_state_dict_paths[tp_rank]
 
     config = AutoConfig.from_pretrained(model_name, tp_parallel=True)
+
+    if torch.cuda.is_available():
+        device="cuda"
+    else:
+        device="cpu"
+
     # we can probably set the device to `meta` here?
     model = AutoModelForCausalLM.from_config(config)
-    model.load_state_dict(torch.load(shard_state_dict_path))
+    model.load_state_dict(torch.load(shard_state_dict_path, map_location=device))
+    model.to(device)
 
     print_rank_0(f"Loaded model in {datetime.datetime.now() - start}")
 
     texts = ["hello my name is", "hello my name is"]
-    input_ids = tokenizer(texts, return_tensors='pt')
-
-    if torch.cuda.is_available():
-        model.cuda()
-        input_ids.to("cuda")
+    input_ids = tokenizer(texts, return_tensors='pt').to(device)
 
     # Greedy generation
     greedy_output = model.generate(
