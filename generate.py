@@ -5,7 +5,9 @@ from pathlib import Path
 import torch
 import torch.distributed
 import torch.distributed.distributed_c10d
+from torch.testing._internal.common_utils import set_default_dtype
 from transformers import AutoTokenizer, AutoModelForCausalLM, LogitsProcessor, AutoConfig, LogitsProcessorList
+from transformers.modeling_utils import no_init_weights
 
 from shard_model import shard_model
 
@@ -89,8 +91,10 @@ def main():
     else:
         device="cpu"
 
-    # we can probably set the device to `meta` here?
-    model = AutoModelForCausalLM.from_config(config).to(dtype)
+    with set_default_dtype(dtype):
+        with no_init_weights():
+            # we can probably set the device to `meta` here?
+            model = AutoModelForCausalLM.from_config(config).to(dtype)
     torch.distributed.barrier(group=process_group)
     print_rank_0(f"Initialized model")
     model.load_state_dict(torch.load(shard_state_dict_path, map_location=device))
