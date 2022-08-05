@@ -151,7 +151,7 @@ def main():
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             # schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
             on_trace_ready=tensorboard_trace_handler(
-                f"./tb_pt_dirty_tp_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+                f"./tb_pt_dirty_tp_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_tp-rank-{tp_rank}-of-{tp_world_size}"
             ),
             record_shapes=True,
             profile_memory=True,
