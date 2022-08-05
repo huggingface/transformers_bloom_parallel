@@ -39,10 +39,10 @@ def initialize_torch_distributed():
     return torch.distributed.distributed_c10d._get_default_group()
 
 # override print with this function
-def print_rank_0(text: str):
+def print_rank_0(*texts):
     process_group = torch.distributed.distributed_c10d._get_default_group()
     if process_group.rank() == 0:
-        print(text)
+        print(*texts)
 
 # Necessary for generate
 class TensorParallelShardedLogitsProcessor(LogitsProcessor):
@@ -57,8 +57,9 @@ class TensorParallelShardedLogitsProcessor(LogitsProcessor):
         return torch.cat(logits_from_tp_ranks, dim=-1)
 
 def main():
-    shard_directory = "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
+    shard_directory = "/home/thomas_wang_huggingface_co/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
     model_name = "bigscience/bloom-350m"
+    dtype = torch.bfloat16
     max_length = 50
 
     process_group = initialize_torch_distributed()
@@ -73,7 +74,7 @@ def main():
     # shard state_dict
     if tp_rank == 0:
         # TODO @thomasw21 do some caching
-        shard_state_dict_paths = shard_model(model_name, Path(shard_directory), tp_world_size=tp_world_size)
+        shard_state_dict_paths = shard_model(model_name, Path(shard_directory), tp_world_size=tp_world_size, dtype=dtype)
         shard_state_dict_paths = [str(path.absolute()) for path in shard_state_dict_paths]
     else:
         shard_state_dict_paths = [None] * tp_world_size
@@ -89,11 +90,14 @@ def main():
         device="cpu"
 
     # we can probably set the device to `meta` here?
-    model = AutoModelForCausalLM.from_config(config)
+    model = AutoModelForCausalLM.from_config(config).to(dtype)
     model.load_state_dict(torch.load(shard_state_dict_path, map_location=device))
     model.to(device)
 
     print_rank_0(f"Loaded model in {datetime.datetime.now() - start}")
+
+    for name, parameters in model.named_parameters():
+        print_rank_0(name, parameters.dtype, parameters.shape)
 
     texts = ["hello my name is", "hello my name is"]
     input_ids = tokenizer(texts, return_tensors='pt').to(device)
