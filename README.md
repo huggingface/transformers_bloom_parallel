@@ -6,7 +6,7 @@ install `transformers` branch: `thomas/dirty_bloom_tp`
 
 ### RUN
 
-`python -m torch.distributed.run --nproc_per_node=2 generate.py`
+`python -m torch.distributed.run --nproc_per_node=2 dirty_tp/generate.py`
 
 ## FX solution
 
@@ -18,4 +18,4 @@ install `transformers`, branch: `thomas/make_tp_work_with_bloom` (we only try to
 
 ### RUN
 
-`python -m torch.distributed.run --nproc_per_node=2 main.py`
+`python -m torch.distributed.run --nproc_per_node=2 fx/main.py`
