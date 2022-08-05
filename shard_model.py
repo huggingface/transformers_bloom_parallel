@@ -80,10 +80,11 @@ def shard_model(model_name: str, path: Path, tp_world_size: int, dtype: torch.dt
     return save_paths
 
 if __name__ == "__main__":
-    model_name = "bigscience/bloom-350m"
-    save_path = Path("/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models")
-    tp_world_size = 2
+    model_name = "bigscience/bloom"
+    save_path = Path("/home/thomas_wang_huggingface_co/models")
+    tp_world_size = 16
+    dtype = torch.bfloat16
 
-    shard_model(model_name, save_path, tp_world_size)
+    shard_model(model_name, save_path, tp_world_size=tp_world_size, dtype=dtype)
 
 

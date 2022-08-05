@@ -58,7 +58,7 @@ class TensorParallelShardedLogitsProcessor(LogitsProcessor):
 
 def main():
     shard_directory = "/home/thomas_wang_huggingface_co/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
-    model_name = "bigscience/bloom-350m"
+    model_name = "bigscience/bloom"
     dtype = torch.bfloat16
     max_length = 50
 
