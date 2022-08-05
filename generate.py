@@ -5,7 +5,6 @@ from pathlib import Path
 import torch
 import torch.distributed
 import torch.distributed.distributed_c10d
-from torch.testing._internal.common_utils import set_default_dtype
 from transformers import AutoTokenizer, AutoModelForCausalLM, LogitsProcessor, AutoConfig, LogitsProcessorList
 from transformers.modeling_utils import no_init_weights
 
@@ -45,6 +44,14 @@ def print_rank_0(*texts):
     process_group = torch.distributed.distributed_c10d._get_default_group()
     if process_group.rank() == 0:
         print(*texts)
+
+def set_default_dtype(dtype):
+    saved_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(saved_dtype)
 
 # Necessary for generate
 class TensorParallelShardedLogitsProcessor(LogitsProcessor):
