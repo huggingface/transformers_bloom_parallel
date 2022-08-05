@@ -6,6 +6,8 @@ from pathlib import Path
 import torch
 import torch.distributed
 import torch.distributed.distributed_c10d
+from torch._C._autograd import ProfilerActivity
+from torch.profiler import profile, tensorboard_trace_handler
 from transformers import AutoTokenizer, AutoModelForCausalLM, LogitsProcessor, AutoConfig, LogitsProcessorList
 from transformers.modeling_utils import no_init_weights
 
@@ -145,14 +147,24 @@ def main():
         input_ids = tokenizer(text, return_tensors='pt').to(device)
 
         # Greedy generation
-        greedy_output = model.generate(
-            **input_ids,
-            max_length=max_length,
-            do_sample=False,
-            logits_processor=LogitsProcessorList([
-                TensorParallelShardedLogitsProcessor(process_group=process_group)
-            ])
-        )
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            # schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+            on_trace_ready=tensorboard_trace_handler(
+                f"./tb_pt_dirty_tp_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+            ),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True
+        ) as prof:
+            greedy_output = model.generate(
+                **input_ids,
+                max_length=max_length,
+                do_sample=False,
+                logits_processor=LogitsProcessorList([
+                    TensorParallelShardedLogitsProcessor(process_group=process_group)
+                ])
+            )
 
         # print generation
         print_rank_0(tokenizer.decode(greedy_output[0], skip_special_tokens=True))
