@@ -117,16 +117,16 @@ def main():
 
     while True:
         # Getting input
-        accumulating_test = tp_rank == 0 # only tp_rank=0 gets the test
+        accumulating_text = tp_rank == 0 # only tp_rank=0 gets the test
         torch.distributed.barrier(group=process_group)
         texts = []
-        while accumulating_test:
-            text = input(
-                '''Enter the paragraph (Enter for to validate new input line and Ctrl-c to start generating the prompt):''')
-            if text == "":
-                accumulating_test = False
-            else:
+        try:
+            while accumulating_text:
+                text = input(
+                    '''Enter the paragraph (Enter for to validate new input line and Ctrl-c to start generating the prompt):''')
                 texts.append(text)
+        except KeyboardInterrupt:
+            pass
         torch.distributed.barrier(group=process_group)
 
         # Broadcast input to every ranks
