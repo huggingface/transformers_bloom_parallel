@@ -91,9 +91,11 @@ def main():
 
     # we can probably set the device to `meta` here?
     model = AutoModelForCausalLM.from_config(config).to(dtype)
+    torch.distributed.barrier(group=process_group)
+    print_rank_0(f"Initialized model")
     model.load_state_dict(torch.load(shard_state_dict_path, map_location=device))
     model.to(device)
-
+    torch.distributed.barrier(group=process_group)
     print_rank_0(f"Loaded model in {datetime.datetime.now() - start}")
 
     for name, parameters in model.named_parameters():
@@ -103,6 +105,7 @@ def main():
     input_ids = tokenizer(texts, return_tensors='pt').to(device)
 
     # Greedy generation
+    torch.distributed.barrier(group=process_group)
     greedy_output = model.generate(
         **input_ids,
         max_length=max_length,
@@ -112,7 +115,7 @@ def main():
         ])
     )
 
-    print(tokenizer.decode(greedy_output[0], skip_special_tokens=True))
+    print_rank_0(tokenizer.decode(greedy_output[0], skip_special_tokens=True))
 
 if __name__ == "__main__":
     main()
