@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import os
 from pathlib import Path
@@ -44,6 +45,8 @@ def print_rank_0(*texts):
     process_group = torch.distributed.distributed_c10d._get_default_group()
     if process_group.rank() == 0:
         print(*texts)
+
+@contextlib.contextmanager
 
 def set_default_dtype(dtype):
     saved_dtype = torch.get_default_dtype()
