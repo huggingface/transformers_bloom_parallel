@@ -11,7 +11,7 @@ from torch.profiler import profile, tensorboard_trace_handler
 from transformers import AutoTokenizer, AutoModelForCausalLM, LogitsProcessor, AutoConfig, LogitsProcessorList
 from transformers.modeling_utils import no_init_weights
 
-from .shard_model import shard_model
+from shard_model import shard_model
 
 
 def initialize_torch_distributed():
@@ -73,7 +73,7 @@ def main():
     shard_directory = "/home/thomas_wang_huggingface_co/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
     model_name = "bigscience/bigscience-small-testing" #"bigscience/bloom"
     dtype = torch.bfloat16
-    max_length = 50
+    max_length = 10
 
     process_group = initialize_torch_distributed()
     tp_rank = process_group.rank()
@@ -122,13 +122,12 @@ def main():
         accumulating_text = tp_rank == 0 # only tp_rank=0 gets the test
         torch.distributed.barrier(group=process_group)
         texts = []
-        try:
-            while accumulating_text:
-                text = input(
-                    '''Enter the paragraph (Enter for to validate new input line and Ctrl-c to start generating the prompt):''')
-                texts.append(text)
-        except KeyboardInterrupt:
-            pass
+        while accumulating_text:
+            text = input(
+                '''Enter the paragraph (Enter for to validate new input line, if new input line is empty we validate):''')
+            if text == "":
+                break
+            texts.append(text)
         torch.distributed.barrier(group=process_group)
 
         # Broadcast input to every ranks
@@ -145,6 +144,7 @@ def main():
 
         # getting generation
         input_ids = tokenizer(text, return_tensors='pt').to(device)
+        original_tokens = len(input_ids["input_ids"])
 
         # Greedy generation
         with profile(
@@ -159,7 +159,7 @@ def main():
         ) as prof:
             greedy_output = model.generate(
                 **input_ids,
-                max_length=max_length,
+                max_length=original_tokens + max_length,
                 do_sample=False,
                 logits_processor=LogitsProcessorList([
                     TensorParallelShardedLogitsProcessor(process_group=process_group)
