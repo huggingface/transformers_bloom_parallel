@@ -103,7 +103,8 @@ def main():
     with set_default_dtype(dtype):
         with no_init_weights():
             # we can probably set the device to `meta` here?
-            model = AutoModelForCausalLM.from_config(config).to("cuda", dtype)
+            model = AutoModelForCausalLM.from_config(config).to(dtype)
+
     torch.distributed.barrier(group=process_group)
     print_rank_0(f"Initialized model")
     model.load_state_dict(torch.load(shard_state_dict_path, map_location=device))
@@ -127,16 +128,22 @@ def main():
             else:
                 texts.append(text)
         torch.distributed.barrier(group=process_group)
+
+        # Broadcast input to every ranks
+        num_text_segment = torch.tensor(len(texts), device=device, dtype=torch.long)
+        torch.distributed.broadcast(num_text_segment, src=0)
+        if tp_rank !=0:
+            texts = [None] * num_text_segment
         torch.distributed.broadcast_object_list(texts, src=0, group=process_group)
 
         text = "\n".join(texts)
 
         # getting generation
-        input_ids = tokenizer.encode(text, return_tensors='pt').to(device)
+        input_ids = tokenizer(text, return_tensors='pt').to(device)
 
         # Greedy generation
         greedy_output = model.generate(
-            input_ids,
+            **input_ids,
             max_length=max_length,
             do_sample=False,
             logits_processor=LogitsProcessorList([
