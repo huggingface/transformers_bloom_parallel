@@ -47,7 +47,6 @@ def print_rank_0(*texts):
         print(*texts)
 
 @contextlib.contextmanager
-
 def set_default_dtype(dtype):
     saved_dtype = torch.get_default_dtype()
     torch.set_default_dtype(dtype)
@@ -115,21 +114,39 @@ def main():
     for name, parameters in model.named_parameters():
         print_rank_0(name, parameters.dtype, parameters.shape)
 
-    texts = ["hello my name is", "hello my name is"]
-    input_ids = tokenizer(texts, return_tensors='pt').to(device)
+    while True:
+        # Getting input
+        accumulating_test = tp_rank == 0 # only tp_rank=0 gets the test
+        torch.distributed.barrier(group=process_group)
+        texts = []
+        while accumulating_test:
+            text = input(
+                '''Enter the paragraph (Enter for to validate new input line and Ctrl-c to start generating the prompt):''')
+            if text == "":
+                accumulating_test = False
+            else:
+                texts.append(text)
+        torch.distributed.barrier(group=process_group)
+        torch.distributed.broadcast_object_list(texts, src=0, group=process_group)
 
-    # Greedy generation
-    torch.distributed.barrier(group=process_group)
-    greedy_output = model.generate(
-        **input_ids,
-        max_length=max_length,
-        do_sample=False,
-        logits_processor=LogitsProcessorList([
-            TensorParallelShardedLogitsProcessor(process_group=process_group)
-        ])
-    )
+        text = "\n".join(texts)
 
-    print_rank_0(tokenizer.decode(greedy_output[0], skip_special_tokens=True))
+        # getting generation
+        input_ids = tokenizer(text, return_tensors='pt').to(device)
+
+        # Greedy generation
+        greedy_output = model.generate(
+            **input_ids,
+            max_length=max_length,
+            do_sample=False,
+            logits_processor=LogitsProcessorList([
+                TensorParallelShardedLogitsProcessor(process_group=process_group)
+            ])
+        )
+
+        # print generation
+        print_rank_0(tokenizer.decode(greedy_output[0], skip_special_tokens=True))
+
 
 if __name__ == "__main__":
     main()
