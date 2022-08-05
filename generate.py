@@ -103,7 +103,7 @@ def main():
     with set_default_dtype(dtype):
         with no_init_weights():
             # we can probably set the device to `meta` here?
-            model = AutoModelForCausalLM.from_config(config).to(dtype)
+            model = AutoModelForCausalLM.from_config(config).to("cuda", dtype)
     torch.distributed.barrier(group=process_group)
     print_rank_0(f"Initialized model")
     model.load_state_dict(torch.load(shard_state_dict_path, map_location=device))
@@ -136,7 +136,7 @@ def main():
 
         # Greedy generation
         greedy_output = model.generate(
-            **input_ids,
+            input_ids,
             max_length=max_length,
             do_sample=False,
             logits_processor=LogitsProcessorList([
