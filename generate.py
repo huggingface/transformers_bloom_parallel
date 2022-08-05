@@ -51,7 +51,7 @@ class TensorParallelShardedLogitsProcessor(LogitsProcessor):
         self.process_group = process_group
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        logits = scores
+        logits = scores.contiguous()
         logits_from_tp_ranks = [torch.empty_like(logits) for _ in range(self.process_group.size())]
         torch.distributed.all_gather(logits_from_tp_ranks, logits, group=self.process_group)
         return torch.cat(logits_from_tp_ranks, dim=-1)
