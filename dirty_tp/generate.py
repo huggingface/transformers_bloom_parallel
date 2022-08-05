@@ -147,6 +147,7 @@ def main():
         original_tokens = len(input_ids["input_ids"])
 
         # Greedy generation
+        torch.distributed.barrier(group=process_group)
         with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             # schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
@@ -165,6 +166,7 @@ def main():
                     TensorParallelShardedLogitsProcessor(process_group=process_group)
                 ])
             )
+            torch.distributed.barrier(group=process_group)
 
         # print generation
         print_rank_0(tokenizer.decode(greedy_output[0], skip_special_tokens=True))
