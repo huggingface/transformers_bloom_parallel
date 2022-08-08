@@ -70,7 +70,7 @@ class TensorParallelShardedLogitsProcessor(LogitsProcessor):
         vocab_size = tp_world_size * vocab_tp_shard_size
         logits = torch.empty(batch_size, vocab_size, dtype=logits_tp_shard.dtype, device=logits_tp_shard.device)
         torch.distributed.all_gather(
-            logits.view(batch_size, tp_world_size, vocab_tp_shard_size).permute(3,0,1,2),
+            logits.view(batch_size, tp_world_size, vocab_tp_shard_size).permute(2,0,1),
             logits,
             group=self.process_group
         )
