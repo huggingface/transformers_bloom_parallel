@@ -65,12 +65,12 @@ class TensorParallelShardedLogitsProcessor(LogitsProcessor):
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
         logits_tp_shard = scores.contiguous()
-        batch_size, seq_length, vocab_tp_shard_size = logits_tp_shard.shape
+        batch_size, vocab_tp_shard_size = logits_tp_shard.shape
         tp_world_size = self.process_group.size()
         vocab_size = tp_world_size * vocab_tp_shard_size
-        logits = torch.empty(batch_size, seq_length, vocab_size, dtype=logits_tp_shard.dtype, device=logits_tp_shard.device)
+        logits = torch.empty(batch_size, vocab_size, dtype=logits_tp_shard.dtype, device=logits_tp_shard.device)
         torch.distributed.all_gather(
-            logits.view(batch_size, seq_length, tp_world_size, vocab_tp_shard_size).permute(3,0,1,2),
+            logits.view(batch_size, tp_world_size, vocab_tp_shard_size).permute(3,0,1,2),
             logits,
             group=self.process_group
         )
