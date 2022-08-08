@@ -64,10 +64,17 @@ class TensorParallelShardedLogitsProcessor(LogitsProcessor):
         self.process_group = process_group
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        logits = scores.contiguous()
-        logits_from_tp_ranks = [torch.empty_like(logits) for _ in range(self.process_group.size())]
-        torch.distributed.all_gather(logits_from_tp_ranks, logits, group=self.process_group)
-        return torch.cat(logits_from_tp_ranks, dim=-1)
+        logits_tp_shard = scores.contiguous()
+        batch_size, seq_length, vocab_tp_shard_size = logits_tp_shard.shape
+        tp_world_size = self.process_group.size()
+        vocab_size = tp_world_size * vocab_tp_shard_size
+        logits = torch.empty(batch_size, seq_length, vocab_size, dtype=logits_tp_shard.dtype, device=logits_tp_shard.device)
+        torch.distributed.all_gather(
+            logits.view(batch_size, seq_length, tp_world_size, vocab_tp_shard_size).permute(3,0,1,2),
+            logits,
+            group=self.process_group
+        )
+        return logits
 
 def main():
     shard_directory = "/home/thomas_wang_huggingface_co/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
