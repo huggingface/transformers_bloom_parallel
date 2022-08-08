@@ -79,6 +79,8 @@ def main():
     tp_rank = process_group.rank()
     tp_world_size = process_group.size()
 
+    tensorboard_folder = f"/home/nicolas_huggingface_co/src/transformers/tensorboard/tb_pt_dirty_tp_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_tp-rank-{tp_rank}-of-{tp_world_size}"
+
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     print_rank_0("Loaded tokenizer!")
     start = datetime.datetime.now()
@@ -148,16 +150,20 @@ def main():
 
         # Greedy generation
         torch.distributed.barrier(group=process_group)
-        with profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            # schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
-            on_trace_ready=tensorboard_trace_handler(
-                f"./tb_pt_dirty_tp_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_tp-rank-{tp_rank}-of-{tp_world_size}"
-            ),
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True
-        ) as prof:
+
+        if tp_rank == 0:
+            prof = profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                # schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+                on_trace_ready=tensorboard_trace_handler(tensorboard_folder),
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True
+            )
+        else:
+            prof = contextlib.nullcontext()
+
+        with prof:
             greedy_output = model.generate(
                 **input_ids,
                 max_length=original_tokens + max_length,
