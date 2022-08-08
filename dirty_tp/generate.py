@@ -86,7 +86,7 @@ def main():
     tp_rank = process_group.rank()
     tp_world_size = process_group.size()
 
-    tensorboard_folder = f"/home/nicolas_huggingface_co/src/transformers/tensorboard/tb_pt_dirty_tp_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_tp-rank-{tp_rank}-of-{tp_world_size}"
+    tensorboard_folder = f"/home/nicolas_huggingface_co/tensorboards/tb_pt_dirty_tp_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_tp-rank-{tp_rank}-of-{tp_world_size}"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     print_rank_0("Loaded tokenizer!")
