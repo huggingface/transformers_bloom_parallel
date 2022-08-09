@@ -140,7 +140,8 @@ def main():
         if do_transpose:
             state_dict[key] = state_dict[key].transpose(1,0).contiguous()
 
-    model.load_state_dict(state_dict)    model.to(device)
+    model.load_state_dict(state_dict)
+    model.to(device)
     torch.distributed.barrier(group=process_group)
     print_rank_0(f"Loaded model in {datetime.datetime.now() - start}")
 
