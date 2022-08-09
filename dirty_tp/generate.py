@@ -134,6 +134,8 @@ def main():
     for name, parameters in model.named_parameters():
         print_rank_0(name, parameters.dtype, parameters.shape)
 
+    model.eval()
+
     while True:
         # Getting input
         accumulating_text = tp_rank == 0 # only tp_rank=0 gets the test
