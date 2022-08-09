@@ -12,7 +12,7 @@ from torch.profiler import profile, tensorboard_trace_handler
 from transformers import AutoTokenizer, AutoModelForCausalLM, LogitsProcessor, AutoConfig, LogitsProcessorList
 from transformers.modeling_utils import no_init_weights
 
-from shard_model import shard_model
+from shard_model import shard_model, match_suffix
 
 
 def initialize_torch_distributed():
@@ -126,8 +126,21 @@ def main():
 
     torch.distributed.barrier(group=process_group)
     print_rank_0(f"Initialized model")
-    model.load_state_dict(torch.load(shard_state_dict_path, map_location=device))
-    model.to(device)
+    state_dict = torch.load(shard_state_dict_path, map_location=device)
+    # TODO @thomasw21: HACK in order to transpose all weight prior
+    for key in state_dict.keys():
+        do_transpose = False
+        if not match_suffix(key, "weight"):
+            continue
+
+        for potential_suffix in ["self_attention.query_key_value.weight", "self_attention.dense.weight", "dense_h_to_4h.weight", "dense_4h_to_h.weight"]:
+            if match_suffix(key, potential_suffix):
+                do_transpose = True
+
+        if do_transpose:
+            state_dict[key] = state_dict[key].transpose(1,0).contiguous()
+
+    model.load_state_dict(state_dict)    model.to(device)
     torch.distributed.barrier(group=process_group)
     print_rank_0(f"Loaded model in {datetime.datetime.now() - start}")
 
