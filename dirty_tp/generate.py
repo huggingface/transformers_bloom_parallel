@@ -1,3 +1,6 @@
+# python -m torch.distributed.run --nproc_per_node=8 transformers_bloom_tensor_parallel/dirty_tp/generate.py
+# python -m torch.distributed.run --nproc_per_node=16 transformers_bloom_tensor_parallel/dirty_tp/generate.py
+
 import contextlib
 import datetime
 import os
@@ -15,6 +18,7 @@ from transformers.modeling_utils import no_init_weights
 from shard_model import shard_model
 
 
+# os.environ['TRANSFORMERS_CACHE'] = '/home/thomas_wang_huggingface_co/.cache/huggingface/transformers'
 def initialize_torch_distributed():
     rank = int(os.getenv('RANK', '0'))
     world_size = int(os.getenv("WORLD_SIZE", '1'))
@@ -33,7 +37,7 @@ def initialize_torch_distributed():
     # Call the init process.
     init_method = 'tcp://'
     master_ip = os.getenv('MASTER_ADDR', 'localhost')
-    master_port = os.getenv('MASTER_PORT', '6000')
+    master_port = os.getenv('MASTER_PORT', '7000')
     init_method += master_ip + ':' + master_port
     torch.distributed.init_process_group(
         backend=backend,
@@ -78,8 +82,10 @@ class TensorParallelShardedLogitsProcessor(LogitsProcessor):
         return logits
 
 def main():
+    # shard_directory = "/home/nouamane_huggingface_co/projects/llm-ultra-fast/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
     shard_directory = "/home/thomas_wang_huggingface_co/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
     model_name = "bigscience/bigscience-small-testing" #"bigscience/bloom"
+    # model_name = "bigscience/bloom" #"bigscience/bloom"
     dtype = torch.bfloat16
     max_length = 10
 
@@ -87,7 +93,8 @@ def main():
     tp_rank = process_group.rank()
     tp_world_size = process_group.size()
 
-    tensorboard_folder = f"/home/nicolas_huggingface_co/tensorboards/tb_pt_dirty_tp_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_tp-rank-{tp_rank}-of-{tp_world_size}"
+    # tensorboard_folder = f"/home/nicolas_huggingface_co/tensorboards/tb_pt_dirty_tp_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_tp-rank-{tp_rank}-of-{tp_world_size}"
+    tensorboard_folder = f"/home/nouamane_huggingface_co/projects/llm-ultra-fast/tb_logs/tb_pt_dirty_tp_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_tp-rank-{tp_rank}-of-{tp_world_size}"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     print_rank_0("Loaded tokenizer!")
@@ -183,7 +190,7 @@ def main():
         with prof:
             greedy_output = model.generate(
                 **input_ids,
-                max_length=original_tokens + max_length,
+                max_new_tokens=10,
                 do_sample=False,
                 logits_processor=LogitsProcessorList([
                     TensorParallelShardedLogitsProcessor(process_group=process_group)
