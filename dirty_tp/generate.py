@@ -78,10 +78,9 @@ class TensorParallelShardedLogitsProcessor(LogitsProcessor):
         return logits
 
 def main():
-    shard_directory = "/home/thomas_wang_huggingface_co/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
+    shard_directory = "/home/nouamane_huggingface_co/projects/llm-ultra-fast/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
     model_name = "bigscience/bigscience-small-testing" #"bigscience/bloom"
     dtype = torch.bfloat16
-    max_length = 10
 
     process_group = initialize_torch_distributed()
     tp_rank = process_group.rank()
@@ -140,14 +139,7 @@ def main():
         # Getting input
         accumulating_text = tp_rank == 0 # only tp_rank=0 gets the test
         torch.distributed.barrier(group=process_group)
-        texts = []
-        while accumulating_text:
-            text = input(
-                '''Enter the paragraph (Enter for to validate new input line, if new input line is empty we validate):''')
-            if text == "":
-                break
-            texts.append(text)
-        torch.distributed.barrier(group=process_group)
+        texts = ['test '] * 10
 
         # Broadcast input to every ranks
         num_text_segment = torch.tensor(len(texts), device=device, dtype=torch.long)
@@ -159,7 +151,7 @@ def main():
             texts = [None] * num_text_segment
         torch.distributed.broadcast_object_list(texts, src=0, group=process_group)
 
-        text = "\n".join(texts)
+        text = " ".join(texts)
 
         # getting generation
         input_ids = tokenizer(text, return_tensors='pt').to(device)
@@ -168,7 +160,7 @@ def main():
         # Greedy generation
         torch.distributed.barrier(group=process_group)
 
-        if tp_rank == 0:
+        if tp_rank == 0 and False:
             prof = profile(
                 activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                 # schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
@@ -180,15 +172,20 @@ def main():
         else:
             prof = contextlib.nullcontext()
 
+        os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
         with prof:
-            greedy_output = model.generate(
-                **input_ids,
-                max_length=original_tokens + max_length,
-                do_sample=False,
-                logits_processor=LogitsProcessorList([
-                    TensorParallelShardedLogitsProcessor(process_group=process_group)
-                ])
-            )
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                with torch.no_grad():
+                    greedy_output = model.generate(
+                        **input_ids,
+                        max_new_tokens=10,
+                        do_sample=False,
+                        logits_processor=LogitsProcessorList([
+                            TensorParallelShardedLogitsProcessor(process_group=process_group)
+                        ])
+                    )
             torch.distributed.barrier(group=process_group)
 
         # print generation
