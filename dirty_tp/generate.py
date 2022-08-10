@@ -15,6 +15,7 @@ from transformers.modeling_utils import no_init_weights
 from shard_model import shard_model
 
 
+# os.environ['TRANSFORMERS_CACHE'] = '/home/thomas_wang_huggingface_co/.cache/huggingface/transformers'
 def initialize_torch_distributed():
     rank = int(os.getenv('RANK', '0'))
     world_size = int(os.getenv("WORLD_SIZE", '1'))
@@ -33,7 +34,7 @@ def initialize_torch_distributed():
     # Call the init process.
     init_method = 'tcp://'
     master_ip = os.getenv('MASTER_ADDR', 'localhost')
-    master_port = os.getenv('MASTER_PORT', '6000')
+    master_port = os.getenv('MASTER_PORT', '7000')
     init_method += master_ip + ':' + master_port
     torch.distributed.init_process_group(
         backend=backend,
@@ -45,9 +46,10 @@ def initialize_torch_distributed():
 
 # override print with this function
 def print_rank_0(*texts):
-    process_group = torch.distributed.distributed_c10d._get_default_group()
-    if process_group.rank() == 0:
-        print(*texts)
+    return
+    # process_group = torch.distributed.distributed_c10d._get_default_group()
+    # if process_group.rank() == 0:
+    #     print(*texts)
 
 @contextlib.contextmanager
 def set_default_dtype(dtype):
@@ -79,12 +81,14 @@ class TensorParallelShardedLogitsProcessor(LogitsProcessor):
 
 def main():
     shard_directory = "/home/nouamane_huggingface_co/projects/llm-ultra-fast/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
+    # shard_directory = "/home/thomas_wang_huggingface_co/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
     model_name = "bigscience/bigscience-small-testing" #"bigscience/bloom"
+    # model_name = "bigscience/bloom" #"bigscience/bloom"
     dtype = torch.bfloat16
 
-    process_group = initialize_torch_distributed()
-    tp_rank = process_group.rank()
-    tp_world_size = process_group.size()
+    # process_group = initialize_torch_distributed()
+    tp_rank = 0
+    tp_world_size = 1
 
     tensorboard_folder = f"/home/nicolas_huggingface_co/tensorboards/tb_pt_dirty_tp_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_tp-rank-{tp_rank}-of-{tp_world_size}"
 
@@ -101,20 +105,20 @@ def main():
     else:
         shard_state_dict_paths = [None] * tp_world_size
 
-    torch.distributed.broadcast_object_list(shard_state_dict_paths, src=0, group=process_group)
+    # torch.distributed.broadcast_object_list(shard_state_dict_paths, src=0, group=process_group)
     shard_state_dict_path = shard_state_dict_paths[tp_rank]
 
-    config = AutoConfig.from_pretrained(model_name, slow_but_exact=False, tp_parallel=True)
+    config = AutoConfig.from_pretrained(model_name, slow_but_exact=False, tp_parallel=False)
 
     if torch.cuda.is_available():
         device="cuda"
 
         # The flag below controls whether to allow TF32 on matmul. This flag defaults to False
         # in PyTorch 1.12 and later.
-        torch.backends.cuda.matmul.allow_tf32 = True
+        # torch.backends.cuda.matmul.allow_tf32 = True
 
         # The flag below controls whether to allow TF32 on cuDNN. This flag defaults to True.
-        torch.backends.cudnn.allow_tf32 = True
+        # torch.backends.cudnn.allow_tf32 = True
     else:
         device="cpu"
 
@@ -123,11 +127,11 @@ def main():
             # we can probably set the device to `meta` here?
             model = AutoModelForCausalLM.from_config(config).to(dtype)
 
-    torch.distributed.barrier(group=process_group)
+    # torch.distributed.barrier(group=process_group)
     print_rank_0(f"Initialized model")
     model.load_state_dict(torch.load(shard_state_dict_path, map_location=device))
     model.to(device)
-    torch.distributed.barrier(group=process_group)
+    # torch.distributed.barrier(group=process_group)
     print_rank_0(f"Loaded model in {datetime.datetime.now() - start}")
 
     for name, parameters in model.named_parameters():
@@ -138,18 +142,18 @@ def main():
     while True:
         # Getting input
         accumulating_text = tp_rank == 0 # only tp_rank=0 gets the test
-        torch.distributed.barrier(group=process_group)
+        # torch.distributed.barrier(group=process_group)
         texts = ['test '] * 10
 
         # Broadcast input to every ranks
         num_text_segment = torch.tensor(len(texts), device=device, dtype=torch.long)
-        torch.distributed.broadcast(num_text_segment, src=0)
+        # torch.distributed.broadcast(num_text_segment, src=0)
         # Early return if texts is empty
         if num_text_segment == 0:
             continue
         if tp_rank != 0:
             texts = [None] * num_text_segment
-        torch.distributed.broadcast_object_list(texts, src=0, group=process_group)
+        # torch.distributed.broadcast_object_list(texts, src=0, group=process_group)
 
         text = " ".join(texts)
 
@@ -158,7 +162,7 @@ def main():
         original_tokens = len(input_ids["input_ids"])
 
         # Greedy generation
-        torch.distributed.barrier(group=process_group)
+        # torch.distributed.barrier(group=process_group)
 
         if tp_rank == 0 and False:
             prof = profile(
@@ -181,12 +185,12 @@ def main():
                     greedy_output = model.generate(
                         **input_ids,
                         max_new_tokens=10,
-                        do_sample=False,
-                        logits_processor=LogitsProcessorList([
-                            TensorParallelShardedLogitsProcessor(process_group=process_group)
-                        ])
+                        # do_sample=False,
+                        # logits_processor=LogitsProcessorList([
+                        #     # # TensorParallelShardedLogitsProcessor(process_group=process_group)
+                        # ])
                     )
-            torch.distributed.barrier(group=process_group)
+            # torch.distributed.barrier(group=process_group)
 
         # print generation
         print_rank_0(tokenizer.decode(greedy_output[0], skip_special_tokens=True))
