@@ -178,6 +178,23 @@ def main():
 
         os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
+        # warmup
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for i in range(3):
+                with torch.no_grad():
+                    greedy_output = model.generate(
+                        **input_ids,
+                        max_new_tokens=10,
+                        # do_sample=False,
+                        # logits_processor=LogitsProcessorList([
+                        #     # # TensorParallelShardedLogitsProcessor(process_group=process_group)
+                        # ])
+                    )
+
+        torch.cuda.current_stream().wait_stream(s)
+
         with prof:
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g):
