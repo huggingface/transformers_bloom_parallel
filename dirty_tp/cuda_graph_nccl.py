@@ -1,5 +1,6 @@
-# python -m torch.distributed.run --nproc_per_node=1 --master_port 7000 transformers_bloom_tensor_parallel/dirty_tp/generate.py
-# torchrun --nproc_per_node=2 --master_port 7000 transformers_bloom_tensor_parallel/dirty_tp/generate.py
+# python -m torch.distributed.run --nproc_per_node=1 --master_port 7000 transformers_bloom_tensor_parallel/dirty_tp/cuda_graph_nccl.py
+# torchrun --nproc_per_node=2 --master_port 7000 transformers_bloom_tensor_parallel/dirty_tp/cuda_graph_nccl.py
+# NCCL_ASYNC_ERROR_HANDLING=1 NCCL_BLOCKING_WAIT=1  torchrun --nproc_per_node=2 --master_port 7000 transformers_bloom_tensor_parallel/dirty_tp/cuda_graph_nccl.py
 import contextlib
 import datetime
 import os
@@ -48,10 +49,9 @@ def initialize_torch_distributed():
 
 # override print with this function
 def print_rank_0(*texts):
-    return
-    # process_group = torch.distributed.distributed_c10d._get_default_group()
-    # if process_group.rank() == 0:
-    #     print(*texts)
+    process_group = torch.distributed.distributed_c10d._get_default_group()
+    if process_group.rank() == 0:
+        print(*texts)
 
 @contextlib.contextmanager
 def set_default_dtype(dtype):
@@ -77,11 +77,18 @@ class TensorParallelShardedLogitsProcessor(LogitsProcessor):
         torch.distributed.all_gather(
             list(logits.view(batch_size, tp_world_size, vocab_tp_shard_size).permute(1,0,2)),
             logits_tp_shard,
-            group=self.process_group
+            group=self.process_group,
+            async_op=True
         )
         return logits
 
 def main():
+
+    os.environ["TORCH_CPP_LOG_LEVEL"]="INFO"
+    os.environ[
+        "TORCH_DISTRIBUTED_DEBUG"
+    ] = "DETAIL"  # set to DETAIL for runtime logging.
+
     shard_directory = "/home/nouamane_huggingface_co/projects/llm-ultra-fast/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
     # shard_directory = "/home/thomas_wang_huggingface_co/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
     model_name = "bigscience/bigscience-small-testing" #"bigscience/bloom"
@@ -92,7 +99,7 @@ def main():
     tp_rank = process_group.rank()
     tp_world_size = process_group.size()
 
-    tensorboard_folder = f"/home/nicolas_huggingface_co/tensorboards/tb_pt_dirty_tp_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_tp-rank-{tp_rank}-of-{tp_world_size}"
+    tensorboard_folder = f"./tb_logs/tb_pt_tp_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_tp-rank-{tp_rank}-of-{tp_world_size}"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     print_rank_0("Loaded tokenizer!")
@@ -180,10 +187,7 @@ def main():
         else:
             prof = contextlib.nullcontext()
 
-        os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-
-        # necessary for NCCL capture
-        os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "0"
+        # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
         # warmup
         s = torch.cuda.Stream()
@@ -203,20 +207,33 @@ def main():
 
         torch.cuda.current_stream().wait_stream(s)
 
+
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            with torch.no_grad():
+                greedy_output = model.generate(
+                    **input_ids,
+                    max_new_tokens=10,
+                    do_sample=False,
+                    logits_processor=LogitsProcessorList([
+                        TensorParallelShardedLogitsProcessor(process_group=process_group)
+                    ])
+                )
+        torch.distributed.barrier(group=process_group)
+
+        inp = tokenizer(text, return_tensors='pt').to(device)
         with prof:
-            g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g):
-            # with contextlib.nullcontext():
-                with torch.no_grad():
-                    greedy_output = model.generate(
-                        **input_ids,
-                        max_new_tokens=10,
-                        do_sample=False,
-                        logits_processor=LogitsProcessorList([
-                            TensorParallelShardedLogitsProcessor(process_group=process_group)
-                        ])
-                    )
-            torch.distributed.barrier(group=process_group)
+            input_ids["input_ids"].copy_(inp["input_ids"].cuda())
+            input_ids["attention_mask"].copy_(inp["attention_mask"].cuda())
+            print_rank_0(input_ids)
+            print_rank_0("Start timer")
+
+            start = datetime.datetime.now()
+            g.replay() # replay the graph and updates outputs
+
+            print_rank_0(greedy_output)
+            print_rank_0(f"Pipeline took {datetime.datetime.now() - start} seconds")
+
 
         # print generation
         print_rank_0(tokenizer.decode(greedy_output[0], skip_special_tokens=True))
