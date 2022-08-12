@@ -90,8 +90,8 @@ def main():
         "TORCH_DISTRIBUTED_DEBUG"
     ] = "DETAIL"  # set to DETAIL for runtime logging.
 
-    shard_directory = "/home/nouamane_huggingface_co/projects/llm-ultra-fast/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
-    # shard_directory = "/home/thomas_wang_huggingface_co/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
+    # shard_directory = "/home/nouamane_huggingface_co/projects/llm-ultra-fast/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
+    shard_directory = "/home/thomas_wang_huggingface_co/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
     model_name = "bigscience/bigscience-small-testing" #"bigscience/bloom"
     # model_name = "bigscience/bloom" #"bigscience/bloom"
     dtype = torch.bfloat16
@@ -146,8 +146,8 @@ def main():
     torch.distributed.barrier(group=process_group)
     print_rank_0(f"Loaded model in {datetime.datetime.now() - start}")
 
-    for name, parameters in model.named_parameters():
-        print_rank_0(name, parameters.dtype, parameters.shape)
+    # for name, parameters in model.named_parameters():
+    #     print_rank_0(name, parameters.dtype, parameters.shape)
 
     model.eval()
 
@@ -155,7 +155,7 @@ def main():
         # Getting input
         accumulating_text = tp_rank == 0 # only tp_rank=0 gets the test
         torch.distributed.barrier(group=process_group)
-        texts = ['test '] * 10
+        texts = ['Hello my name is']
 
         # Broadcast input to every ranks
         num_text_segment = torch.tensor(len(texts), device=device, dtype=torch.long)
@@ -220,24 +220,25 @@ def main():
                         TensorParallelShardedLogitsProcessor(process_group=process_group)
                     ])
                 )
-            torch.distributed.barrier(group=process_group, async_op=True)
+            torch.distributed.barrier(group=process_group, async_op=True) # this is important or else: RuntimeError: CUDA error: capturing stream has unjoined work
 
         inp = tokenizer(text, return_tensors='pt').to(device)
         with prof:
-            input_ids["input_ids"].copy_(inp["input_ids"].cuda())
-            input_ids["attention_mask"].copy_(inp["attention_mask"].cuda())
-            print_rank_0(input_ids)
-            print_rank_0("Start timer")
+            for _ in range(3):
+                input_ids["input_ids"].copy_(inp["input_ids"])
+                input_ids["attention_mask"].copy_(inp["attention_mask"])
+                print_rank_0(input_ids)
+                print_rank_0("Start timer")
 
-            start = datetime.datetime.now()
-            g.replay() # replay the graph and updates outputs
+                start = datetime.datetime.now()
 
-            print_rank_0(greedy_output)
-            print_rank_0(f"Pipeline took {datetime.datetime.now() - start} seconds")
+                g.replay() # replay the graph and updates outputs
 
+                print_rank_0(greedy_output)
+                
+                print_rank_0(f"Pipeline took {datetime.datetime.now() - start} seconds")
+                print_rank_0(tokenizer.decode(greedy_output[0], skip_special_tokens=True))
 
-        # print generation
-        print_rank_0(tokenizer.decode(greedy_output[0], skip_special_tokens=True))
         break
 
 
