@@ -1,6 +1,7 @@
 # python -m torch.distributed.run --nproc_per_node=1 --master_port 7000 transformers_bloom_tensor_parallel/dirty_tp/cuda_graph_nccl.py
 # torchrun --nproc_per_node=2 --master_port 7000 transformers_bloom_tensor_parallel/dirty_tp/cuda_graph_nccl.py
 # NCCL_ASYNC_ERROR_HANDLING=1 NCCL_BLOCKING_WAIT=1  torchrun --nproc_per_node=2 --master_port 7000 transformers_bloom_tensor_parallel/dirty_tp/cuda_graph_nccl.py
+# NCCL_ASYNC_ERROR_HANDLING=1 NCCL_BLOCKING_WAIT=1 are necessary or else we get `what():  CUDA error: invalid argument` error`
 import contextlib
 import datetime
 import os
@@ -219,7 +220,7 @@ def main():
                         TensorParallelShardedLogitsProcessor(process_group=process_group)
                     ])
                 )
-        torch.distributed.barrier(group=process_group)
+            torch.distributed.barrier(group=process_group, async_op=True)
 
         inp = tokenizer(text, return_tensors='pt').to(device)
         with prof:
