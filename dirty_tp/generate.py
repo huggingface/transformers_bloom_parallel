@@ -22,7 +22,7 @@ from transformers import (
 from transformers.modeling_utils import no_init_weights
 
 from shard_model import shard_model, match_suffix
-from utils import unroll_parameters
+from utils import unroll_parameters, TensorParallelShardedLogitsProcessor
 
 BATCH_SIZE = 32
 
@@ -234,14 +234,12 @@ def main(args):
             device
         )
 
+        logits_gatherer = TensorParallelShardedLogitsProcessor(process_group=process_group)
         next_id_choosers, stopping_criterias = unroll_parameters(parameterss)
 
         torch.distributed.barrier(group=process_group)
 
-        all_input_ids = [
-            input_ids["input_ids"][i : i + 1]
-            for i in range(input_ids["input_ids"].shape[0])
-        ]
+        all_input_ids = input_ids["input_ids"]
 
         # As long as we still have something there.
         tokens = 0
@@ -257,41 +255,43 @@ def main(args):
 
                 keep_ids = []
                 keep_past_ids = []
-                next_input_ids = []
                 something_has_exited = False
-                for i in range(input_ids["input_ids"].shape[0]):
-                    logits = outputs.logits[i : i + 1]
-                    next_id_chooser = next_id_choosers[i]
-                    stopping_criteria = stopping_criterias[i]
-                    all_ids = all_input_ids[i]
-                    topic = topics[i]
 
-                    next_ids = next_id_chooser(all_ids, logits[:, -1])
-                    all_ids = torch.cat([all_ids, next_ids], dim=1)
-                    all_input_ids[i] = all_ids
+                batch_size = input_ids["input_ids"].shape[0]
 
+                # Compute logits
+                next_ids = torch.empty(input_ids["input_ids"].shape[0])
+                # the following idea is largely copied from this PR: https://github.com/huggingface/transformers/pull/5420/files
+                # all samplers can be found in `generation_utils_samplers.py`
+                process_group = torch.distributed.distributed_c10d._get_default_group()
+                logits = logits_gatherer(input_ids["input_ids"], outputs.logits[:,-1])
+
+                # Choose next ids
+                next_input_ids = torch.empty(batch_size, dtype=torch.long, device=device)
+                for i, (next_id_chooser, all_ids) in enumerate(zip(next_id_choosers, all_input_ids)):
+                    next_input_id = next_id_chooser(all_ids, logits[i:i+1])
+                    next_input_ids[i] = next_input_id
+
+                # Update `all_input_ids` and check generation stop condition
+                all_input_ids = torch.cat([all_input_ids, next_input_id])
+                for i, (all_ids, stopping_criteria) in enumerate(zip(all_input_ids, stopping_criterias)):
                     if stopping_criteria(all_ids):
-                        output = tokenizer.decode(all_ids[0], skip_special_tokens=True)
-                        print_rank_0(topic, repr(output))
                         something_has_exited = True
                         if tp_rank == 0:
+                            topic = topics[i]
+                            output = tokenizer.decode(all_ids[0], skip_special_tokens=True)
+                            print_rank_0(topic, repr(output))
                             total_time = datetime.datetime.now() - start
                             print(f"Generated {tokens} tokens in {total_time} ({total_time/tokens} / token)")
                             r.publish(topic, pickle.dumps({"output": output}))
                     else:
                         keep_ids.append(i)
-                        keep_past_ids.extend(
-                            [
-                                j
-                                for j in range(
-                                    i, i + config.n_head // process_group.size()
-                                )
-                            ]
-                        )
-                        next_input_ids.append(next_ids)
+                        keep_past_ids.append(slice(i, i + config.n_head // process_group.size()))
+
 
                 if not keep_ids:
                     break
+                keep_ids = torch.tensor(keep_ids, dtype=torch.long, device=device)
 
                 if something_has_exited:
                     input_ids["attention_mask"] = input_ids["attention_mask"][keep_ids]
@@ -301,18 +301,18 @@ def main(args):
                     ]
                     next_id_choosers = [next_id_choosers[i] for i in keep_ids]
                     stopping_criterias = [stopping_criterias[i] for i in keep_ids]
-                    all_input_ids = [all_input_ids[i] for i in keep_ids]
                     topics = [topics[i] for i in keep_ids]
+                    next_input_ids = next_ids.index_select(dim=0, index=keep_ids)
+                    all_input_ids = all_input_ids.index_select(dim=0, index=keep_ids)
                 else:
                     input_ids["past_key_values"] = outputs["past_key_values"]
+                    next_input_ids = next_ids
 
-                input_ids["input_ids"] = torch.cat(next_input_ids, dim=0)
+                input_ids["input_ids"] = next_input_ids
                 input_ids["attention_mask"] = torch.cat(
                     [
                         input_ids["attention_mask"],
-                        torch.ones((input_ids["attention_mask"].shape[0], 1)).to(
-                            input_ids["attention_mask"].device
-                        ),
+                        torch.ones((input_ids["attention_mask"].shape[0], 1), device=device),
                     ],
                     dim=1,
                 )

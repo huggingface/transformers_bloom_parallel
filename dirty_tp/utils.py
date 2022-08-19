@@ -33,20 +33,16 @@ class Greedy():
 class NextIdChooser:
     def __init__(self, temperature=1.0, top_k=None, top_p= None, do_sample=False, **kwargs):
         warpers = LogitsProcessorList()
-        # the following idea is largely copied from this PR: https://github.com/huggingface/transformers/pull/5420/files
-        # all samplers can be found in `generation_utils_samplers.py`
-        process_group = torch.distributed.distributed_c10d._get_default_group()
-        warpers.append(TensorParallelShardedLogitsProcessor(process_group=process_group))
         sampling = do_sample
         if temperature is not None and temperature != 1.0:
             warpers.append(TemperatureLogitsWarper(temperature))
-            sampling=True
+            sampling = True
         if top_k is not None and top_k != 0:
             warpers.append(TopKLogitsWarper(top_k=top_k))
-            sampling=True
+            sampling = True
         if top_p is not None and top_p < 1.0:
             warpers.append(TopPLogitsWarper(top_p=top_p))
-            sampling=True
+            sampling = True
         # warpers.append(LogitNormalization())
         # print("Sampling", sampling)
         # print("top_p", top_p)
@@ -80,6 +76,5 @@ def unroll_parameters(parameterss):
     for parameters in parameterss:
         next_ids_choosers.append(NextIdChooser(**parameters))
         stopping_criterias.append(StoppingCriteria(**parameters))
-
 
     return next_ids_choosers, stopping_criterias
