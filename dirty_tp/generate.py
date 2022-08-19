@@ -262,7 +262,6 @@ def main(args):
                 # Compute logits
                 # the following idea is largely copied from this PR: https://github.com/huggingface/transformers/pull/5420/files
                 # all samplers can be found in `generation_utils_samplers.py`
-                process_group = torch.distributed.distributed_c10d._get_default_group()
                 logits = logits_gatherer(input_ids["input_ids"], outputs.logits[:,-1])
 
                 # Choose next ids
