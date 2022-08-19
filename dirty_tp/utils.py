@@ -22,7 +22,7 @@ class TensorParallelShardedLogitsProcessor(LogitsProcessor):
 class Sampling():
     def __call__(self, logits):
         probs = torch.nn.functional.softmax(logits, dim=-1)
-        next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+        next_tokens = torch.multinomial(probs, num_samples=1)[..., 0]
         return next_tokens
 
 class Greedy():
@@ -43,11 +43,6 @@ class NextIdChooser:
         if top_p is not None and top_p < 1.0:
             warpers.append(TopPLogitsWarper(top_p=top_p))
             sampling = True
-        # warpers.append(LogitNormalization())
-        # print("Sampling", sampling)
-        # print("top_p", top_p)
-        # print("top_k", top_k)
-        # print("temperature", temperature)
 
         self.warpers = warpers
         self.choice = Sampling() if sampling else Greedy()
@@ -62,13 +57,9 @@ class StoppingCriteria:
         self.max_new_tokens = max_new_tokens
         self.current_tokens = 0
 
-
     def __call__(self, all_ids):
         self.current_tokens += 1
-        if self.current_tokens >= self.max_new_tokens:
-            return True
-        return False
-
+        return self.current_tokens >= self.max_new_tokens
 
 def unroll_parameters(parameterss):
     next_ids_choosers = []
