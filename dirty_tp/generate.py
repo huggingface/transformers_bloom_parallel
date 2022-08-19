@@ -94,9 +94,21 @@ def safe_receive(r, p, tokenizer, max_input_tokens, blocking=True):
         if message is None:
             return message
         (topic, inputs, parameters) = message
+        if not inputs or not isinstance(inputs, str):
+            print(f"Ignored prompt was incorrect {inputs}")
+            r.publish(
+                topic,
+                pickle.dumps(
+                    {
+                        "error": f"This prompt is empty or invalid"
+                    }
+                ),
+            )
+            continue
         input_ids = tokenizer(inputs, return_tensors="pt")
-        if input_ids["input_ids"].shape[1] > max_input_tokens:
-            print(f"Ignored prompt was too long {input_ids.shape[1]}")
+        original_tokens = input_ids["input_ids"].shape[1]
+        if original_tokens > max_input_tokens:
+            print(f"Ignored prompt was too long {original_tokens}")
             r.publish(
                 topic,
                 pickle.dumps(

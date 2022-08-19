@@ -52,11 +52,33 @@ def generate():
     inputs = body.get("inputs", "Hello")
     parameters = body.get("parameters", {})
 
+    temperature = parameters.get("temperature", None)
+    if temperature is not None:
+        if not isinstance(temperature, (int, float)) or temperature <= 0:
+            return make_response(
+                {"error": "Temperature needs to be >0"},
+                400,
+            )
+    top_k = parameters.get("top_k", None)
+    if top_k is not None:
+        if not isinstance(top_k, (int)) or top_k <= 0:
+            return make_response(
+                {"error": "top_k is an integer > 0"},
+                400,
+            )
+    top_p = parameters.get("top_p", None)
+    if top_p is not None:
+        if not isinstance(top_p, (int, float)) or top_p <= 0 or top_p > 1:
+            return make_response(
+                {"error": "top_p is an float > 0 and <=1"},
+                400,
+            )
+
     parameters = {
         "do_sample": parameters.get("do_sample", None),
-        "temperature": parameters.get("temperature", None),
-        "top_k": parameters.get("top_k", None),
-        "top_p": parameters.get("top_p", None),
+        "temperature": temperature,
+        "top_k": top_k,
+        "top_p": top_p,
         "max_new_tokens": parameters.get("max_new_tokens", 20),
     }
 
