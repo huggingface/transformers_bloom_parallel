@@ -286,8 +286,9 @@ def main(args):
                             r.publish(topic, pickle.dumps({"output": output}))
                     else:
                         keep_ids.append(i)
-                        keep_past_ids.append(slice(i, i + config.n_head // process_group.size()))
-
+                        keep_past_ids.append([
+                            list(range(i, i + config.n_head // process_group.size()))
+                        ])
 
                 if not keep_ids:
                     break
