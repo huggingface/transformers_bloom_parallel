@@ -260,7 +260,6 @@ def main(args):
                 batch_size = input_ids["input_ids"].shape[0]
 
                 # Compute logits
-                next_ids = torch.empty(input_ids["input_ids"].shape[0])
                 # the following idea is largely copied from this PR: https://github.com/huggingface/transformers/pull/5420/files
                 # all samplers can be found in `generation_utils_samplers.py`
                 process_group = torch.distributed.distributed_c10d._get_default_group()
