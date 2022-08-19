@@ -1,3 +1,4 @@
+import argparse
 import contextlib
 import datetime
 import os
@@ -13,6 +14,15 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, LogitsProcessor, A
 from transformers.modeling_utils import no_init_weights
 
 from shard_model import shard_model, match_suffix
+
+def get_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--shard-directory", type=str, default="data/models", help="TP requires sharding a checkpoint, we use the directory to save/load sharded checkpoints")
+    parser.add_argument("--model", type=str, default="bigscience/bloom-350m")
+    parser.add_argument("--dtype", type=torch.dtype, default=torch.float16)
+    parser.add_argument("--max-new-tokens", type=int, default=20)
+    parser.add_argument("--profile", action="store_true", help="If we want to Pytorch profiler")
+    return parser.parse_args()
 
 
 def initialize_torch_distributed():
@@ -78,10 +88,7 @@ class TensorParallelShardedLogitsProcessor(LogitsProcessor):
         return logits
 
 def main():
-    shard_directory = "/home/thomas_wang_huggingface_co/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
-    model_name = "bigscience/bigscience-small-testing" #"bigscience/bloom"
-    dtype = torch.bfloat16
-    max_length = 10
+    args = get_args()
 
     process_group = initialize_torch_distributed()
     tp_rank = process_group.rank()
@@ -89,7 +96,7 @@ def main():
 
     tensorboard_folder = f"/home/nicolas_huggingface_co/tensorboards/tb_pt_dirty_tp_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_tp-rank-{tp_rank}-of-{tp_world_size}"
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, padding_side="left")
     print_rank_0("Loaded tokenizer!")
     start = datetime.datetime.now()
     print_rank_0("Loading model")
@@ -97,7 +104,7 @@ def main():
     # shard state_dict
     if tp_rank == 0:
         # TODO @thomasw21 do some caching
-        shard_state_dict_paths = shard_model(model_name, Path(shard_directory), tp_world_size=tp_world_size, dtype=dtype)
+        shard_state_dict_paths = shard_model(args.model_name, Path(args.shard_directory), tp_world_size=tp_world_size, dtype=args.dtype)
         shard_state_dict_paths = [str(path.absolute()) for path in shard_state_dict_paths]
     else:
         shard_state_dict_paths = [None] * tp_world_size
@@ -105,7 +112,7 @@ def main():
     torch.distributed.broadcast_object_list(shard_state_dict_paths, src=0, group=process_group)
     shard_state_dict_path = shard_state_dict_paths[tp_rank]
 
-    config = AutoConfig.from_pretrained(model_name, slow_but_exact=False, tp_parallel=True)
+    config = AutoConfig.from_pretrained(args.model_name, slow_but_exact=False, tp_parallel=True)
 
     if torch.cuda.is_available():
         device="cuda"
@@ -119,14 +126,14 @@ def main():
     else:
         device="cpu"
 
-    with set_default_dtype(dtype):
+    with set_default_dtype(args.dtype):
         with no_init_weights():
             # we can probably set the device to `meta` here?
-            model = AutoModelForCausalLM.from_config(config).to(dtype)
+            model = AutoModelForCausalLM.from_config(config).to(args.dtype)
 
     torch.distributed.barrier(group=process_group)
     print_rank_0(f"Initialized model")
-    state_dict = torch.load(shard_state_dict_path, map_location=device)
+    state_dict = torch.load(shard_state_dict_path)
     # TODO @thomasw21: HACK in order to transpose all weight prior
     for key in state_dict.keys():
         do_transpose = False
@@ -141,6 +148,7 @@ def main():
             state_dict[key] = state_dict[key].transpose(1,0).contiguous()
 
     model.load_state_dict(state_dict)
+    del state_dict
     model.to(device)
     torch.distributed.barrier(group=process_group)
     print_rank_0(f"Loaded model in {datetime.datetime.now() - start}")
@@ -182,7 +190,7 @@ def main():
         # Greedy generation
         torch.distributed.barrier(group=process_group)
 
-        if tp_rank == 0:
+        if tp_rank == 0 and args.profile:
             prof = profile(
                 activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                 # schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
@@ -194,20 +202,23 @@ def main():
         else:
             prof = contextlib.nullcontext()
 
+        start = datetime.datetime.now()
         with prof:
             greedy_output = model.generate(
                 **input_ids,
-                max_length=original_tokens + max_length,
+                max_new_tokens=args.max_new_tokens,
                 do_sample=False,
                 logits_processor=LogitsProcessorList([
                     TensorParallelShardedLogitsProcessor(process_group=process_group)
                 ])
             )
             torch.distributed.barrier(group=process_group)
+        stop = datetime.datetime.now()
 
         # print generation
         print_rank_0(tokenizer.decode(greedy_output[0], skip_special_tokens=True))
-
+        generated_num_tokens = len(greedy_output[0]) - original_tokens
+        print_rank_0(f"Took {stop - start} ({(stop - start) / generated_num_tokens} / token)")
 
 if __name__ == "__main__":
     main()
