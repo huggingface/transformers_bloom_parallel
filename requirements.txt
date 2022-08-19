@@ -1,0 +1,4 @@
+-e git+https://github.com/huggingface/transformers.git@thomas/add_custom_kernels#egg=transformers
+safetensors==0.2.1
+redis==4.3.4
+torch==1.12.0+cu116 -f https://download.pytorch.org/whl/cu116/torch_stable.html
