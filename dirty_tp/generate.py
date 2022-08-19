@@ -259,7 +259,7 @@ def main(args):
                     next_input_ids[i] = next_input_id
 
                 # Update `all_input_ids` and check generation stop condition
-                all_input_ids = torch.cat([all_input_ids, next_input_id])
+                all_input_ids = torch.cat([all_input_ids, next_input_ids])
                 keep_ids = []
                 keep_past_ids = []
                 something_has_exited = False
