@@ -284,13 +284,12 @@ def main(args):
                             r.publish(topic, pickle.dumps({"output": output}))
                     else:
                         keep_ids.append(i)
-                        keep_past_ids.append([
+                        keep_past_ids.extend([
                             list(range(i, i + config.n_head // process_group.size()))
                         ])
 
                 if not keep_ids:
                     break
-                keep_ids = torch.tensor(keep_ids, dtype=torch.long, device=device)
 
                 if something_has_exited:
                     input_ids["attention_mask"] = input_ids["attention_mask"][keep_ids]
@@ -301,11 +300,11 @@ def main(args):
                     next_id_choosers = [next_id_choosers[i] for i in keep_ids]
                     stopping_criterias = [stopping_criterias[i] for i in keep_ids]
                     topics = [topics[i] for i in keep_ids]
-                    next_input_ids = next_ids.index_select(dim=0, index=keep_ids)
-                    all_input_ids = all_input_ids.index_select(dim=0, index=keep_ids)
+                    next_input_ids = next_input_ids[keep_ids]
+                    all_input_ids = all_input_ids[keep_ids]
                 else:
                     input_ids["past_key_values"] = outputs["past_key_values"]
-                    next_input_ids = next_ids
+                    next_input_ids = next_input_ids
 
                 input_ids["input_ids"] = next_input_ids
                 input_ids["attention_mask"] = torch.cat(
