@@ -50,7 +50,7 @@ class NextIdChooser:
     def __call__(self, input_ids, scores):
         scores = self.warpers(input_ids, scores)
         next_ids = self.choice(scores)
-        return next_ids.unsqueeze(-1)
+        return next_ids[..., None]
 
 class StoppingCriteria:
     def __init__(self, max_new_tokens=20, **kwargs):
