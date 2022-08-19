@@ -217,7 +217,6 @@ def main(args):
         else:
             items = []
         print_rank_0(f"Got batch of {len(items)}")
-        torch.distributed.barrier(group=process_group)
 
         # Broadcast input to every ranks
         num_text_segment = torch.tensor(len(items), device=device, dtype=torch.long)
@@ -237,25 +236,14 @@ def main(args):
         logits_gatherer = TensorParallelShardedLogitsProcessor(process_group=process_group)
         next_id_choosers, stopping_criterias = unroll_parameters(parameterss)
 
-        torch.distributed.barrier(group=process_group)
-
         all_input_ids = input_ids["input_ids"]
 
         # As long as we still have something there.
         tokens = 0
         with torch.no_grad():
             while True:
-                # for k, v in input_ids.items():
-                #     if isinstance(v, (list, tuple)):
-                #         print_rank_0(k, v[0][0].shape)
-                #     else:
-                #         print_rank_0(k, v.shape)
                 outputs = model.forward(**input_ids, use_cache=True)
                 tokens += 1
-
-                keep_ids = []
-                keep_past_ids = []
-                something_has_exited = False
 
                 batch_size = input_ids["input_ids"].shape[0]
 
@@ -272,6 +260,9 @@ def main(args):
 
                 # Update `all_input_ids` and check generation stop condition
                 all_input_ids = torch.cat([all_input_ids, next_input_id])
+                keep_ids = []
+                keep_past_ids = []
+                something_has_exited = False
                 for i, (all_ids, stopping_criteria) in enumerate(zip(all_input_ids, stopping_criterias)):
                     if stopping_criteria(all_ids):
                         something_has_exited = True
