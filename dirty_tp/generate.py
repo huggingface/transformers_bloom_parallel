@@ -1,4 +1,5 @@
 import contextlib
+import redis
 import datetime
 import os
 import pickle
@@ -69,23 +70,43 @@ def set_default_dtype(dtype):
         torch.set_default_dtype(saved_dtype)
 
 
-def safe_receive(r, p, tokenizer, max_input_tokens):
-    for message in p.listen():
+def get_message(p, blocking: bool):
+    if blocking:
+        for message in p.listen():
+            if message["type"] == "message":
+                data = pickle.loads(message["data"])
+                # print(f"Received {data}")
+                return data
+    else:
+        message = p.get_message()
+        if message is None:
+            return message
         if message["type"] == "message":
-            (topic, inputs, parameters) = pickle.loads(message["data"])
-            input_ids = tokenizer(inputs, return_tensors="pt")
-            if input_ids["input_ids"].shape[1] > max_input_tokens:
-                print(f"Ignored prompt was too long {input_ids.shape[1]}")
-                r.publish(
-                    topic,
-                    pickle.dumps(
-                        {
-                            "error": f"This is a long prompt ({original_tokens} tokens long). We're limiting to {args.max_input_tokens}."
-                        }
-                    ),
-                )
-                continue
-            return topic, inputs, parameters
+            data = pickle.loads(message["data"])
+            return data
+
+
+
+
+def safe_receive(r, p, tokenizer, max_input_tokens, blocking=True):
+    while True:
+        message = get_message(p, blocking)
+        if message is None:
+            return message
+        (topic, inputs, parameters) = message
+        input_ids = tokenizer(inputs, return_tensors="pt")
+        if input_ids["input_ids"].shape[1] > max_input_tokens:
+            print(f"Ignored prompt was too long {input_ids.shape[1]}")
+            r.publish(
+                topic,
+                pickle.dumps(
+                    {
+                        "error": f"This is a long prompt ({original_tokens} tokens long). We're limiting to {args.max_input_tokens}."
+                    }
+                ),
+            )
+            continue
+        return topic, inputs, parameters
 
 
 def main(args):
@@ -184,21 +205,18 @@ def main(args):
         # Getting input
         torch.distributed.barrier(group=process_group)
         if tp_rank == 0:
-            print(f"Waiting for new objects")
-            items = [safe_receive(r, p, tokenizer, args.max_input_tokens)]
+            items = [safe_receive(r, p, tokenizer, args.max_input_tokens, blocking=True)]
 
-            sub.setsockopt(zmq.RCVTIMEO, 0)
             while len(items) < BATCH_SIZE:
-                try:
-                    print("Waiting for the batch")
-                    item = safe_receive(r, p, tokenizer, args.max_input_tokens)
-                    items.append(item)
-                except zmq.error.Again:
+                item = safe_receive(r, p, tokenizer, args.max_input_tokens, blocking=False)
+                if item is None:
                     break
-            sub.setsockopt(zmq.RCVTIMEO, -1)
-            print(f"Received batch of {len(items)}")
+                items.append(item)
+
+            start = datetime.datetime.now()
         else:
             items = []
+        print_rank_0(f"Got batch of {len(items)}")
         torch.distributed.barrier(group=process_group)
 
         # Broadcast input to every ranks
@@ -226,6 +244,7 @@ def main(args):
         ]
 
         # As long as we still have something there.
+        tokens = 0
         with torch.no_grad():
             while True:
                 # for k, v in input_ids.items():
@@ -234,6 +253,7 @@ def main(args):
                 #     else:
                 #         print_rank_0(k, v.shape)
                 outputs = model.forward(**input_ids, use_cache=True)
+                tokens += 1
 
                 keep_ids = []
                 keep_past_ids = []
@@ -255,7 +275,9 @@ def main(args):
                         print_rank_0(topic, repr(output))
                         something_has_exited = True
                         if tp_rank == 0:
-                            pub.send(b"%s %s" % (topic, pickle.dumps(output)))
+                            total_time = datetime.datetime.now() - start
+                            print(f"Generated {tokens} tokens in {total_time} ({total_time/tokens} / token)")
+                            r.publish(topic, pickle.dumps({"output": output}))
                     else:
                         keep_ids.append(i)
                         keep_past_ids.extend(
@@ -340,12 +362,6 @@ if __name__ == "__main__":
     parser = ArgumentParser()
 
     parser.add_argument("--name", required=True, type=str, help="model_name")
-    parser.add_argument(
-        "--workers",
-        required=True,
-        type=int,
-        help="How many publishers exist and we need to connect to",
-    )
     parser.add_argument(
         "--max-input-tokens",
         required=True,

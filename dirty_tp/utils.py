@@ -69,7 +69,7 @@ class StoppingCriteria:
 
     def __call__(self, all_ids):
         self.current_tokens += 1
-        if self.current_tokens > self.max_new_tokens:
+        if self.current_tokens >= self.max_new_tokens:
             return True
         return False
 

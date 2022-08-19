@@ -70,11 +70,13 @@ def generate():
     p = r.pubsub()
     p.subscribe([topic])
 
+    q.put(1)
     r.publish("query", pickle.dumps((topic, inputs, parameters)))
 
     for message in p.listen():
-        print("Message", message)
+        # print("Message", message)
         if message["type"] == "message":
+            q.get()
             out = pickle.loads(message["data"])
             if "error" in out:
                 return make_response(out, 400)
