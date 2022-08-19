@@ -47,7 +47,7 @@ class NextIdChooser:
         if top_p is not None and top_p < 1.0:
             warpers.append(TopPLogitsWarper(top_p=top_p))
             sampling=True
-        warpers.append(LogitNormalization())
+        # warpers.append(LogitNormalization())
         # print("Sampling", sampling)
         # print("top_p", top_p)
         # print("top_k", top_k)
