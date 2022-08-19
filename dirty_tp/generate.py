@@ -1,7 +1,10 @@
 import contextlib
 import datetime
 import os
+import pickle
+import zmq
 from pathlib import Path
+import json
 
 import torch
 import torch.backends
@@ -13,7 +16,9 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, LogitsProcessor, A
 from transformers.modeling_utils import no_init_weights
 
 from shard_model import shard_model, match_suffix
+from utils import unroll_parameters
 
+BATCH_SIZE=32
 
 def initialize_torch_distributed():
     rank = int(os.getenv('RANK', '0'))
@@ -58,36 +63,31 @@ def set_default_dtype(dtype):
     finally:
         torch.set_default_dtype(saved_dtype)
 
-# Necessary for generate
-class TensorParallelShardedLogitsProcessor(LogitsProcessor):
-    def __init__(self, process_group: torch.distributed.ProcessGroup):
-        super().__init__()
-        self.process_group = process_group
+def safe_receive(sub, tokenizer, max_input_tokens):
+    while True:
+        topic, inputs, parameters = sub.recv_pyobj()
+        input_ids = tokenizer(inputs, return_tensors='pt')
+        if input_ids["input_ids"].shape[1] > max_input_tokens:
+            print("Ignored prompt was too long {input_ids.shape[1]}")
+            pub.send(b"%s %s" % (topic, pickle.dumps({"error": f"This is a long prompt ({original_tokens} tokens long). We're limiting to {args.max_input_tokens}."})))
+            continue
+        return topic, inputs, parameters
 
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        logits_tp_shard = scores.contiguous()
-        batch_size, vocab_tp_shard_size = logits_tp_shard.shape
-        tp_world_size = self.process_group.size()
-        vocab_size = tp_world_size * vocab_tp_shard_size
-        logits = torch.empty(batch_size, vocab_size, dtype=logits_tp_shard.dtype, device=logits_tp_shard.device)
-        torch.distributed.all_gather(
-            list(logits.view(batch_size, tp_world_size, vocab_tp_shard_size).permute(1,0,2)),
-            logits_tp_shard,
-            group=self.process_group
-        )
-        return logits
-
-def main():
-    shard_directory = "/home/thomas_wang_huggingface_co/models" # "/Users/thomas/code/bigscience/transformers_bloom_tensor_parallel/models"
-    model_name = "bigscience/bigscience-small-testing" #"bigscience/bloom"
+def main(args):
+    shard_directory = os.getenv("MODELS_CACHE", "/data/models/")
+    model_name = args.name
     dtype = torch.bfloat16
-    max_length = 10
+    max_new_tokens = 20
 
     process_group = initialize_torch_distributed()
     tp_rank = process_group.rank()
     tp_world_size = process_group.size()
 
-    tensorboard_folder = f"/home/nicolas_huggingface_co/tensorboards/tb_pt_dirty_tp_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_tp-rank-{tp_rank}-of-{tp_world_size}"
+
+    # oprint = print
+    # def print_server(*args, **kwargs):
+    #     oprint(f"[Rank {tp_rank}]", *args, **kwargs)
+    # print = print_server
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     print_rank_0("Loaded tokenizer!")
@@ -106,18 +106,16 @@ def main():
     shard_state_dict_path = shard_state_dict_paths[tp_rank]
 
     config = AutoConfig.from_pretrained(model_name, slow_but_exact=False, tp_parallel=True)
+    config.pad_token_id = 3
 
-    if torch.cuda.is_available():
-        device="cuda"
+    device="cuda"
 
-        # The flag below controls whether to allow TF32 on matmul. This flag defaults to False
-        # in PyTorch 1.12 and later.
-        torch.backends.cuda.matmul.allow_tf32 = True
+    # The flag below controls whether to allow TF32 on matmul. This flag defaults to False
+    # in PyTorch 1.12 and later.
+    torch.backends.cuda.matmul.allow_tf32 = True
 
-        # The flag below controls whether to allow TF32 on cuDNN. This flag defaults to True.
-        torch.backends.cudnn.allow_tf32 = True
-    else:
-        device="cpu"
+    # The flag below controls whether to allow TF32 on cuDNN. This flag defaults to True.
+    torch.backends.cudnn.allow_tf32 = True
 
     with set_default_dtype(dtype):
         with no_init_weights():
@@ -126,7 +124,7 @@ def main():
 
     torch.distributed.barrier(group=process_group)
     print_rank_0(f"Initialized model")
-    state_dict = torch.load(shard_state_dict_path, map_location=device)
+    state_dict = torch.load(shard_state_dict_path)
     # TODO @thomasw21: HACK in order to transpose all weight prior
     for key in state_dict.keys():
         do_transpose = False
@@ -143,71 +141,175 @@ def main():
     model.load_state_dict(state_dict)
     model.to(device)
     torch.distributed.barrier(group=process_group)
+    model = model.eval()
     print_rank_0(f"Loaded model in {datetime.datetime.now() - start}")
 
-    for name, parameters in model.named_parameters():
-        print_rank_0(name, parameters.dtype, parameters.shape)
 
-    model.eval()
 
+
+    if tp_rank == 0:
+        context = zmq.Context()
+        pub_port = 5559
+        pub = context.socket(zmq.PUB)
+        pub.connect(f"tcp://localhost:{pub_port}")
+
+        # Socket to talk to server
+        port = 5560
+        context = zmq.Context()
+        sub = context.socket(zmq.SUB)
+        sub.connect(f"tcp://localhost:{port}")
+        sub.setsockopt(zmq.SUBSCRIBE, b"query")
+
+    print(f"Ready in {datetime.datetime.now() - start}")
+    torch.distributed.barrier(group=process_group)
+    accumulating_text = tp_rank == 0 # only tp_rank=0 gets the test
     while True:
         # Getting input
-        accumulating_text = tp_rank == 0 # only tp_rank=0 gets the test
         torch.distributed.barrier(group=process_group)
-        texts = []
-        while accumulating_text:
-            text = input(
-                '''Enter the paragraph (Enter for to validate new input line, if new input line is empty we validate):''')
-            if text == "":
-                break
-            texts.append(text)
+        if tp_rank == 0:
+            print(f"Waiting for new objects")
+            items = [safe_receive(sub, tokenizer, args.max_input_tokens)]
+
+            sub.setsockopt(zmq.RCVTIMEO, 0)
+            while len(items) < BATCH_SIZE:
+                try:
+                    print("Waiting for the batch")
+                    item = safe_receive(sub, tokenizer, args.max_input_tokens)
+                    items.append(item)
+                except zmq.error.Again:
+                    break
+            sub.setsockopt(zmq.RCVTIMEO, -1)
+            print(f"Received batch of {len(items)}")
+        else:
+            items = []
         torch.distributed.barrier(group=process_group)
 
         # Broadcast input to every ranks
-        num_text_segment = torch.tensor(len(texts), device=device, dtype=torch.long)
+        num_text_segment = torch.tensor(len(items), device=device, dtype=torch.long)
         torch.distributed.broadcast(num_text_segment, src=0)
-        # Early return if texts is empty
-        if num_text_segment == 0:
-            continue
-        if tp_rank != 0:
+
+        if tp_rank == 0:
+            texts = items
+        else:
             texts = [None] * num_text_segment
         torch.distributed.broadcast_object_list(texts, src=0, group=process_group)
 
-        text = "\n".join(texts)
+        topics, inputss, parameterss = zip(*texts)
+        input_ids = tokenizer(list(inputss), return_tensors='pt', padding=True).to(device)
 
-        # getting generation
-        input_ids = tokenizer(text, return_tensors='pt').to(device)
-        original_tokens = len(input_ids["input_ids"])
+        next_id_choosers, stopping_criterias = unroll_parameters(parameterss)
 
-        # Greedy generation
+
         torch.distributed.barrier(group=process_group)
 
-        if tp_rank == 0:
-            prof = profile(
-                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                # schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
-                on_trace_ready=tensorboard_trace_handler(tensorboard_folder),
-                record_shapes=True,
-                profile_memory=True,
-                with_stack=True
-            )
-        else:
-            prof = contextlib.nullcontext()
+        all_input_ids = [input_ids["input_ids"][i: i+1] for i in range(input_ids["input_ids"].shape[0])]
 
-        with prof:
-            greedy_output = model.generate(
-                **input_ids,
-                max_length=original_tokens + max_length,
-                do_sample=False,
-                logits_processor=LogitsProcessorList([
-                    TensorParallelShardedLogitsProcessor(process_group=process_group)
-                ])
-            )
-            torch.distributed.barrier(group=process_group)
+        # As long as we still have something there.
+        with torch.no_grad():
+            while True:
+                # for k, v in input_ids.items():
+                #     if isinstance(v, (list, tuple)):
+                #         print_rank_0(k, v[0][0].shape)
+                #     else:
+                #         print_rank_0(k, v.shape)
+                outputs = model.forward(**input_ids, use_cache=True)
 
-        # print generation
-        print_rank_0(tokenizer.decode(greedy_output[0], skip_special_tokens=True))
+                keep_ids = []
+                keep_past_ids = []
+                next_input_ids = []
+                something_has_exited = False
+                for i in range(input_ids["input_ids"].shape[0]):
+                    logits = outputs.logits[i: i+1]
+                    next_id_chooser = next_id_choosers[i]
+                    stopping_criteria = stopping_criterias[i]
+                    all_ids = all_input_ids[i]
+                    topic = topics[i]
+
+                    next_ids = next_id_chooser(all_ids, logits[:, -1])
+                    all_ids = torch.cat([all_ids, next_ids], dim=1)
+                    all_input_ids[i] = all_ids
+
+                    if stopping_criteria(all_ids):
+                        output = tokenizer.decode(all_ids[0], skip_special_tokens=True)
+                        print_rank_0(topic, repr(output))
+                        something_has_exited = True
+                        if tp_rank == 0:
+                            pub.send(b"%s %s" % (topic, pickle.dumps(output)))
+                    else:
+                        keep_ids.append(i)
+                        keep_past_ids.extend([j for j in range(i, i + config.n_head // process_group.size() )])
+                        next_input_ids.append(next_ids)
+
+                if not keep_ids:
+                    break
+
+
+                if something_has_exited:
+                    input_ids["attention_mask"] = input_ids["attention_mask"][keep_ids]
+                    input_ids["past_key_values"] = [(key[keep_past_ids], value[keep_past_ids]) for key, value in  outputs["past_key_values"]]
+                    next_id_choosers = [next_id_choosers[i] for i in keep_ids]
+                    stopping_criterias = [stopping_criterias[i] for i in keep_ids]
+                    all_input_ids = [all_input_ids[i] for i in keep_ids]
+                    topics = [topics[i] for i in keep_ids]
+                else:
+                    input_ids["past_key_values"] = outputs["past_key_values"]
+
+                input_ids["input_ids"] = torch.cat(next_input_ids, dim=0)
+                input_ids["attention_mask"] = torch.cat([input_ids["attention_mask"], torch.ones((input_ids["attention_mask"].shape[0], 1)).to(input_ids["attention_mask"].device)], dim=1)
+
+
+
+
+
+
+
+
+        # # Use profiler only when asked for
+        # if args.profile and tp_rank == 0:
+        #     prof = profile(
+        #         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        #         # schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+        #         on_trace_ready=tensorboard_trace_handler(tensorboard_folder),
+        #         record_shapes=True,
+        #         profile_memory=True,
+        #         with_stack=True
+        #     )
+        # else:
+        #     prof = contextlib.nullcontext()
+
+        # start = datetime.datetime.now()
+        # with prof:
+        #     greedy_output = model.generate(
+        #         **input_ids,
+        #         **parameters,
+        #         logits_processor=LogitsProcessorList([
+        #             TensorParallelShardedLogitsProcessor(process_group=process_group)
+        #         ])
+        #     )
+        #     torch.distributed.barrier(group=process_group)
+        # stop = datetime.datetime.now()
+
+        # # print generation
+        # output_tokens = greedy_output[0]
+        # output = tokenizer.decode(output_tokens, skip_special_tokens=True)
+
+        # actual_new_tokens = len(output_tokens) - input_ids["input_ids"].shape[1]
+        # print_rank_0(f"Took {stop - start} ({(stop - start) / actual_new_tokens} / token) ({actual_new_tokens})")
+
+        # if tp_rank == 0:
+        #     msg = {"topic": topic, "output": output}
+        #     print(f"Sending {msg}")
+        #     pub.send_pyobj(msg)
 
 
 if __name__ == "__main__":
-    main()
+    torch.manual_seed(0)
+    from argparse import ArgumentParser
+    parser = ArgumentParser()
+
+    parser.add_argument("--name", required=True, type=str, help="model_name")
+    parser.add_argument("--workers", required=True, type=int, help="How many publishers exist and we need to connect to")
+    parser.add_argument("--max-input-tokens", required=True, type=int, help="Maximum prompt length (in tokens)")
+    parser.add_argument("--profile", action="store_true")
+    args = parser.parse_args()
+    main(args)

@@ -81,7 +81,7 @@ def shard_model(model_name: str, path: Path, tp_world_size: int, dtype: torch.dt
 
 if __name__ == "__main__":
     model_name = "bigscience/bloom"
-    save_path = Path("/home/thomas_wang_huggingface_co/models")
+    save_path = Path("/home/nicolas_huggingface_co/models")
     tp_world_size = 16
     dtype = torch.bfloat16
 
