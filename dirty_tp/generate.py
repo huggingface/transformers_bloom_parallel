@@ -255,8 +255,7 @@ def main(args):
                 # Choose next ids
                 next_input_ids = torch.empty(batch_size, dtype=torch.long, device=device)
                 for i, (next_id_chooser, all_ids) in enumerate(zip(next_id_choosers, all_input_ids)):
-                    next_input_id = next_id_chooser(all_ids, logits[i:i+1])
-                    next_input_ids[i] = next_input_id
+                    next_input_ids[i] = next_id_chooser(all_ids, logits[i:i+1])
 
                 # Update `all_input_ids` and check generation stop condition
                 all_input_ids = torch.cat([all_input_ids, next_input_ids])
@@ -295,7 +294,6 @@ def main(args):
                     all_input_ids = all_input_ids[keep_ids]
                 else:
                     input_ids["past_key_values"] = outputs["past_key_values"]
-                    next_input_ids = next_input_ids
 
                 input_ids["input_ids"] = next_input_ids
                 input_ids["attention_mask"] = torch.cat(
