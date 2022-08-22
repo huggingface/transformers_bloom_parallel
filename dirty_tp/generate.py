@@ -217,6 +217,9 @@ def main(args):
         else:
             items = []
         print_rank_0(f"Got batch of {len(items)}")
+        # Important because otherwise we get weird `Socket Timeout` error:
+        #   `is setting up NCCL communicator and retreiving ncclUniqueId from [0] via c10d key-value store by key '0'`
+        torch.distributed.barrier(group=process_group)
 
         # Broadcast input to every ranks
         num_text_segment = torch.tensor(len(items), device=device, dtype=torch.long)
