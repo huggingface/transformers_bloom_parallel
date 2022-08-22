@@ -265,6 +265,7 @@ def main(args):
                 keep_ids = []
                 keep_past_ids = []
                 something_has_exited = False
+                assert len(all_input_ids) == len(stopping_criterias), f"`all_input_ids` and `stopping_criterias` do not have the same length: {len(all_input_ids)} vs {len(stopping_criterias)}"
                 for i, (all_ids, stopping_criteria) in enumerate(zip(all_input_ids, stopping_criterias)):
                     if stopping_criteria(all_ids):
                         something_has_exited = True
