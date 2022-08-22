@@ -5,7 +5,7 @@ import requests
 API_URL = "http://localhost:8000/generate"
 def query(payload):
     response = requests.request("POST", API_URL, json=payload)
-    return json.loads(response.content.decode("utf-8"))
+    print(json.loads(response.content.decode("utf-8")))
 
 batch_size = 32
 
