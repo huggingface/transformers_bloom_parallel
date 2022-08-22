@@ -39,6 +39,7 @@ class NextIdChooser:
         warpers.append(TensorParallelShardedLogitsProcessor(process_group=process_group))
         sampling = do_sample
         if temperature is not None and temperature != 1.0:
+            temperature = float(temperature)
             warpers.append(TemperatureLogitsWarper(temperature))
             sampling=True
         if top_k is not None and top_k != 0:

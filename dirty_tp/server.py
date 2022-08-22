@@ -59,6 +59,7 @@ def generate():
                 {"error": "Temperature needs to be >0"},
                 400,
             )
+        temperature = float(temperature)
     top_k = parameters.get("top_k", None)
     if top_k is not None:
         if not isinstance(top_k, (int)) or top_k <= 0:
@@ -66,6 +67,7 @@ def generate():
                 {"error": "top_k is an integer > 0"},
                 400,
             )
+        top_k = int(top_k)
     top_p = parameters.get("top_p", None)
     if top_p is not None:
         if not isinstance(top_p, (int, float)) or top_p <= 0 or top_p > 1:
@@ -73,6 +75,7 @@ def generate():
                 {"error": "top_p is an float > 0 and <=1"},
                 400,
             )
+        top_p = float(top_p)
 
     parameters = {
         "do_sample": parameters.get("do_sample", None),
