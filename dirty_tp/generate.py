@@ -253,12 +253,12 @@ def main(args):
                 logits = logits_gatherer(input_ids["input_ids"], outputs.logits[:,-1])
 
                 # Choose next ids
-                next_input_ids = torch.empty(batch_size, dtype=torch.long, device=device)
+                next_input_ids = torch.empty(batch_size, 1, dtype=torch.long, device=device)
                 for i, (next_id_chooser, all_ids) in enumerate(zip(next_id_choosers, all_input_ids)):
                     next_input_ids[i] = next_id_chooser(all_ids, logits[i:i+1])
 
                 # Update `all_input_ids` and check generation stop condition
-                all_input_ids = torch.cat([all_input_ids, next_input_ids])
+                all_input_ids = torch.cat([all_input_ids, next_input_ids], dim=-1)
                 keep_ids = []
                 keep_past_ids = []
                 something_has_exited = False
@@ -267,16 +267,14 @@ def main(args):
                         something_has_exited = True
                         if tp_rank == 0:
                             topic = topics[i]
-                            output = tokenizer.decode(all_ids[0], skip_special_tokens=True)
+                            output = tokenizer.decode(all_ids, skip_special_tokens=True)
                             print_rank_0(topic, repr(output))
                             total_time = datetime.datetime.now() - start
                             print(f"Generated {tokens} tokens in {total_time} ({total_time/tokens} / token)")
                             r.publish(topic, pickle.dumps({"output": output}))
                     else:
                         keep_ids.append(i)
-                        keep_past_ids.extend([
-                            list(range(i, i + config.n_head // process_group.size()))
-                        ])
+                        keep_past_ids.extend(range(i, i + config.n_head // process_group.size()))
 
                 if not keep_ids:
                     break

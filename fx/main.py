@@ -97,7 +97,6 @@ def main():
     texts = [" ".join(["Hello my name is"] * 32), " ".join(["Hello my name is"] * 32)] # np padding batch. long
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     input_ids = tokenizer.batch_encode_plus(texts, return_tensors="pt", padding=True)
-    print(input_ids)
 
     # Move everything to cuda if possible
     if torch.cuda.is_available():
