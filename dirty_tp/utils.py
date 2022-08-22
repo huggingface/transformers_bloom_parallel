@@ -18,7 +18,7 @@ class TensorParallelShardedLogitsProcessor(LogitsProcessor):
             logits_tp_shard,
             group=self.process_group
         )
-        return torch.stack(shards, dim=1).view(batch_size, vocab_size)
+        return torch.stack(shards, dim=1).view(batch_size, vocab_size).contiguous()
 
 class Sampling():
     def __call__(self, logits):
