@@ -4,20 +4,15 @@ import datetime
 import os
 import pickle
 from pathlib import Path
-import json
 
 import torch
 import torch.backends
 import torch.distributed
 import torch.distributed.distributed_c10d
-from torch._C._autograd import ProfilerActivity
-from torch.profiler import profile, tensorboard_trace_handler
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
-    LogitsProcessor,
     AutoConfig,
-    LogitsProcessorList,
 )
 from transformers.modeling_utils import no_init_weights
 
@@ -25,7 +20,12 @@ from shard_model import shard_model, match_suffix
 from utils import unroll_parameters, TensorParallelShardedLogitsProcessor
 
 BATCH_SIZE = 32
-
+TORCH_DTYPES = {
+    "float": torch.float,
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+}
 
 def initialize_torch_distributed():
     rank = int(os.getenv("RANK", "0"))
@@ -112,7 +112,7 @@ def safe_receive(r, p, tokenizer, max_input_tokens, blocking=True):
 def main(args):
     shard_directory = os.getenv("MODELS_CACHE", "/data/models/")
     model_name = args.name
-    dtype = torch.bfloat16
+    dtype = args.dtype
     max_new_tokens = 20
 
     process_group = initialize_torch_distributed()
@@ -354,5 +354,6 @@ if __name__ == "__main__":
         help="Maximum prompt length (in tokens)",
     )
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--dtype", type=lambda value: TORCH_DTYPES[value], required=True)
     args = parser.parse_args()
     main(args)
