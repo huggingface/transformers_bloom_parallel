@@ -11,6 +11,6 @@ batch_size = 32
 
 with ThreadPool(batch_size) as pool:
     pool.map(
-        lambda : query({"inputs": "test", "parameters": {"max_new_tokens": 20, "do_sample": False}}),
+        lambda _: query({"inputs": "test", "parameters": {"max_new_tokens": 20, "do_sample": False}}),
         range(batch_size)
     )

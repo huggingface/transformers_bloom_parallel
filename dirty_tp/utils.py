@@ -1,4 +1,5 @@
 import torch
+import torch.distributed
 from transformers.generation_logits_process import LogitsProcessorList, TemperatureLogitsWarper, TopPLogitsWarper, TopKLogitsWarper, LogitNormalization, LogitsProcessor
 
 class TensorParallelShardedLogitsProcessor(LogitsProcessor):
@@ -11,13 +12,13 @@ class TensorParallelShardedLogitsProcessor(LogitsProcessor):
         batch_size, vocab_tp_shard_size = logits_tp_shard.shape
         tp_world_size = self.process_group.size()
         vocab_size = tp_world_size * vocab_tp_shard_size
-        logits = torch.empty(batch_size, vocab_size, dtype=logits_tp_shard.dtype, device=logits_tp_shard.device)
+        shards = [torch.empty(batch_size, vocab_tp_shard_size, dtype=logits_tp_shard.dtype, device=logits_tp_shard.device) for _ in range(tp_world_size)]
         torch.distributed.all_gather(
-            list(logits.view(batch_size, tp_world_size, vocab_tp_shard_size).permute(1,0,2)),
+            shards,
             logits_tp_shard,
             group=self.process_group
         )
-        return logits
+        return torch.stack(shards, dim=1).view(batch_size, vocab_size)
 
 class Sampling():
     def __call__(self, logits):
