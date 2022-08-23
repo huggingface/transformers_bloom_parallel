@@ -256,9 +256,13 @@ def main(args):
                 logits = logits_gatherer(input_ids["input_ids"], outputs.logits[:,-1])
 
                 # Choose next ids
-                next_input_ids = torch.empty(batch_size, 1, dtype=torch.long, device=device)
-                for i, (next_id_chooser, all_ids) in enumerate(zip(next_id_choosers, all_input_ids)):
-                    next_input_ids[i] = next_id_chooser(all_ids, logits[i:i+1])
+                next_input_ids = torch.cat(
+                    [
+                        next_id_chooser(all_ids, logits[i:i + 1])
+                        for i, (next_id_chooser, all_ids) in enumerate(zip(next_id_choosers, all_input_ids))
+                    ],
+                    dim=0
+                )
 
                 # Update `all_input_ids` and check generation stop condition
                 all_input_ids = torch.cat([all_input_ids, next_input_ids], dim=-1)
