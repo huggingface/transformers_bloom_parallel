@@ -212,10 +212,9 @@ def main(args):
                 if item is None:
                     break
                 items.append(item)
-
-            start = datetime.datetime.now()
         else:
             items = []
+        start = datetime.datetime.now()
         print_rank_0(f"Got batch of {len(items)}")
         # Important because otherwise we get weird `Socket Timeout` error:
         #   `is setting up NCCL communicator and retreiving ncclUniqueId from [0] via c10d key-value store by key '0'`
@@ -248,8 +247,6 @@ def main(args):
                 outputs = model.forward(**input_ids, use_cache=True)
                 tokens += 1
 
-                batch_size = input_ids["input_ids"].shape[0]
-
                 # Compute logits
                 # the following idea is largely copied from this PR: https://github.com/huggingface/transformers/pull/5420/files
                 # all samplers can be found in `generation_utils_samplers.py`
@@ -267,7 +264,6 @@ def main(args):
                 # Update `all_input_ids` and check generation stop condition
                 all_input_ids = torch.cat([all_input_ids, next_input_ids], dim=-1)
                 keep_ids = []
-                keep_past_ids = []
                 something_has_exited = False
                 assert len(all_input_ids) == len(stopping_criterias), f"`all_input_ids` and `stopping_criterias` do not have the same length: {len(all_input_ids)} vs {len(stopping_criterias)}"
                 for i, (all_ids, stopping_criteria) in enumerate(zip(all_input_ids, stopping_criterias)):
@@ -282,7 +278,8 @@ def main(args):
                             r.publish(topic, pickle.dumps({"output": output}))
                     else:
                         keep_ids.append(i)
-                        keep_past_ids.extend(range(i, i + config.n_head // process_group.size()))
+
+                keep_past_ids = sum(list(range(i, i + config.n_head // process_group.size())) for i in keep_ids)
 
                 if not keep_ids:
                     break
