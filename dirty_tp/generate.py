@@ -101,7 +101,7 @@ def safe_receive(r, p, tokenizer, max_input_tokens, blocking=True):
                 topic,
                 pickle.dumps(
                     {
-                        "error": f"This is a long prompt ({original_tokens} tokens long). We're limiting to {args.max_input_tokens}."
+                        "error": f"This is a long prompt ({input_ids['input_ids'].shape[1]} tokens long). We're limiting to {args.max_input_tokens}."
                     }
                 ),
             )
@@ -216,24 +216,19 @@ def main(args):
             items = []
         start = datetime.datetime.now()
         print_rank_0(f"Got batch of {len(items)}")
-        # Important because otherwise we get weird `Socket Timeout` error:
-        #   `is setting up NCCL communicator and retreiving ncclUniqueId from [0] via c10d key-value store by key '0'`
-        torch.distributed.barrier(group=process_group)
+        # # Important because otherwise we get weird `Socket Timeout` error:
+        # #   `is setting up NCCL communicator and retreiving ncclUniqueId from [0] via c10d key-value store by key '0'`
+        # torch.distributed.barrier(group=process_group)
 
-        # Broadcast input to every ranks
-        num_text_segment = torch.tensor(len(items), device=device, dtype=torch.long)
-        torch.distributed.broadcast(num_text_segment, src=0)
-
+        # HACK: `torch.distributed.broadcast_object_list` allows for like as input in their API.
         if tp_rank == 0:
-            texts = items
+            object_list = [items]
         else:
-            texts = [None] * num_text_segment
-        torch.distributed.broadcast_object_list(texts, src=0, group=process_group)
+            object_list = [None]
+        torch.distributed.broadcast_object_list(object_list, src=0, group=process_group)
 
-        topics, inputss, parameterss = zip(*texts)
-        input_ids = tokenizer(list(inputss), return_tensors="pt", padding=True).to(
-            device
-        )
+        topics, inputss, parameterss = zip(*object_list[0])
+        input_ids = tokenizer(list(inputss), return_tensors="pt", padding=True).to(device)
 
         logits_gatherer = TensorParallelShardedLogitsProcessor(process_group=process_group)
         next_id_choosers, stopping_criterias = unroll_parameters(parameterss)
@@ -244,7 +239,7 @@ def main(args):
         tokens = 0
         with torch.no_grad():
             while True:
-                outputs = model.forward(**input_ids, use_cache=True)
+                outputs = model(**input_ids, use_cache=True)
                 tokens += 1
 
                 # Compute logits
