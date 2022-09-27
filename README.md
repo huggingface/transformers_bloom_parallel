@@ -4,6 +4,8 @@
 
 install `transformers` branch: `thomas/dirty_bloom_tp`
 
+(install `transformers` with custom cuda kernel: `thomas/add_custom_kernels`)
+
 ### RUN
 
 `python -m torch.distributed.run --nproc_per_node=2 dirty_tp/generate.py`
