@@ -202,6 +202,7 @@ def main(args):
     model.to(device)
     torch.distributed.barrier(group=process_group)
     model = model.eval()
+    num_heads = config.n_head // process_group.size()
     print_rank_0(f"Loaded model in {datetime.datetime.now() - start}")
 
     if tp_rank == 0:
@@ -296,7 +297,7 @@ def main(args):
                             [
                                 j
                                 for j in range(
-                                    i, i + config.n_head // process_group.size()
+                                    i * num_heads, (i + 1) * num_heads
                                 )
                             ]
                         )
