@@ -4,20 +4,37 @@
 
 install `transformers` branch: `thomas/dirty_bloom_tp`
 
-(install `transformers` with custom cuda kernel for some additional performances `thomas/add_custom_kernels`)
+```
+pip -e git+https://github.com/huggingface/transformers.git@thomas/add_custom_kernels#egg=transformers
+```
+
+Alternatively,
+For the custom kernel:
+```
+git clone https://github.com/huggingface/transformers.git
+cd transformers
+git checkout thomas/add_custom_kernels
+python setup.py build_ext --inplace # Might have to edit `setup.py` to remove the torch import
+pip install -e .
+```
+
 
 ### RUN
 
-`python -m torch.distributed.run --nproc_per_node=2 dirty_tp/generate.py`
+This will require `redis` to be installed on the machine.
+Redis is the easiest way to communicate through pubsub to all the various processes without causing too much issues for NCCL 
+or the webserver threading/circuit breaking model.
 
-## FX solution
+```
+python -m torch.distributed.run --nproc_per_node=8 generate.py --name bigscience/bloom --max-input-tokens=1000 --save-path=/data/models/
+```
+```
+python server.py
+```
 
-### SETUP
 
-install `optimum`, branch: `thomas/make_tensor_parallel_via_fx`
+### USE
 
-install `transformers`, branch: `thomas/make_tp_work_with_bloom` (we only try to support bloom for now)
-
-### RUN
-
-`python -m torch.distributed.run --nproc_per_node=2 fx/main.py`
+```
+curl -X POST -d '{"inputs": "This is a test", "parameters": {"max_new_tokens": 20, "temperature": 0.4}}' http://localhost:8000/generate -H "content-type: application/json"
+```
