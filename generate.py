@@ -21,7 +21,11 @@ from transformers import (
     AutoConfig,
     LogitsProcessorList,
 )
-from transformers.models.bloom.parallel_layers import TensorParallelColumnLinear, TensorParallelEmbedding, TensorParallelRowLinear
+from transformers.models.bloom.parallel_layers import (
+    TensorParallelColumnLinear,
+    TensorParallelEmbedding,
+    TensorParallelRowLinear,
+)
 
 from huggingface_hub import HfApi, hf_hub_download
 from transformers.modeling_utils import no_init_weights
@@ -29,13 +33,6 @@ from transformers.modeling_utils import no_init_weights
 from utils import unroll_parameters
 
 BATCH_SIZE = 32
-
-
-def set_tensor(model, full_name, tensor):
-    module_name, tensor_name = full_name.rsplit(".", 1)
-    module = model.get_submodule(module_name)
-    tensor = tensor.contiguous()
-    module._parameters[tensor_name] = tensor
 
 
 def initialize_torch_distributed():
@@ -125,6 +122,7 @@ def safe_receive(r, p, tokenizer, max_input_tokens, blocking=True):
             continue
         return topic, inputs, parameters
 
+
 def dl_weights(group, model_id):
     rank = group.rank()
     api = HfApi()
@@ -135,12 +133,18 @@ def dl_weights(group, model_id):
     # Download the files only on rank 0
     if rank == 0:
         # XXX: You might want to try and launch these in a multiprocessing.Pool to download the files faster.
-        [hf_hub_download(model_id, filename=filename, local_files_only=True) for filename in filenames]
+        [
+            hf_hub_download(model_id, filename=filename, local_files_only=True)
+            for filename in filenames
+        ]
     else:
         pass
     torch.distributed.barrier(group=group)
     # At this point the files should be in cache
-    return [hf_hub_download(model_id, filename=filename, local_files_only=True) for filename in filenames]
+    return [
+        hf_hub_download(model_id, filename=filename, local_files_only=True)
+        for filename in filenames
+    ]
 
 
 @contextmanager
@@ -203,6 +207,7 @@ def init_empty_weights(include_buffers: bool = False):
         ) in tensor_constructors_to_patch.items():
             setattr(torch, torch_function_name, old_torch_function)
 
+
 def load(model, filenames, group):
     tp_rank = group.rank()
     tp_world_size = group.size()
@@ -255,11 +260,14 @@ def load(model, filenames, group):
                     tensor = slice_[:]
 
                 if current_tensor.shape != tensor.shape:
-                    raise ValueError(f"Name {name} -- Current {current_tensor.shape} and got {tensor.shape}")
+                    raise ValueError(
+                        f"Name {name} -- Current {current_tensor.shape} and got {tensor.shape}"
+                    )
 
-                set_tensor(model, full_name, tensor)
+                tensor = tensor.contiguous()
+                module._parameters[param_name] = tensor
                 if name == "word_embeddings.weight":
-                    set_tensor(model, "lm_head.weight", tensor)
+                    module._parameters["lm_head.weight"] = tensor
 
 
 def main(args):
