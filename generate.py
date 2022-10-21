@@ -29,6 +29,16 @@ from utils import unroll_parameters
 BATCH_SIZE = 32
 
 
+def set_tensor(model, full_name, tensor):
+    splits = full_name.split(".")
+    for split in splits[:-1]:
+        model = getattr(model, split)
+    tensor_name = splits[-1]
+
+    with torch.no_grad():
+        model._parameters[tensor_name] = tensor
+
+
 def initialize_torch_distributed():
     rank = int(os.getenv("RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
@@ -116,14 +126,14 @@ def safe_receive(r, p, tokenizer, max_input_tokens, blocking=True):
             continue
         return topic, inputs, parameters
 
-
 def dl_weights(rank, model_id):
+    revision = "refs/pr/121"
     api = HfApi()
-    info = api.model_info(model_id)
+    info = api.model_info(model_id, revision=revision)
     filenames = set(
         s.rfilename for s in info.siblings if s.rfilename.endswith(".safetensors")
     )
-    return [hf_hub_download(model_id, filename=filename) for filename in filenames]
+    return [hf_hub_download(model_id, filename=filename, revision=revision) for filename in filenames]
 
 
 @contextmanager
@@ -197,7 +207,7 @@ def main(args):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     print_rank_0("Loaded tokenizer!")
-    start = datetime.datetime.now()
+    start_time = datetime.datetime.now()
     print_rank_0("Ensures files on disk")
     # shard state_dict
     filenames = dl_weights(tp_rank, model_name)
@@ -217,6 +227,7 @@ def main(args):
     # The flag below controls whether to allow TF32 on cuDNN. This flag defaults to True.
     torch.backends.cudnn.allow_tf32 = True
 
+    config.tp_parallel = True
     with set_default_dtype(dtype):
         with init_empty_weights():
             # we can probably set the device to `meta` here?
@@ -225,35 +236,68 @@ def main(args):
 
     torch.distributed.barrier(group=process_group)
     print_rank_0("Initialized empty model")
-    state_dict = {}
-    for file in filenames:
-        with safe_open(file, framework="pt", device=f"cuda:{tp_rank}") as f:
+    parameters = dict(model.named_parameters())
+    for filename in filenames:
+        with safe_open(filename, framework="pt", device=f"cuda:{tp_rank}") as f:
             for name in f.keys():
                 full_name = f"transformer.{name}"
-                # param = parameters[full_name]
-                tensor = f.get_tensor(name)
+                current_tensor = parameters[full_name]
+                handled = False
                 for suffix in [
-                    "self_attention.query_key_value.weight",
                     "self_attention.dense.weight",
-                    "dense_h_to_4h.weight",
-                    "dense_4h_to_h.weight",
+                    "mlp.dense_4h_to_h.weight",
+
+                    "self_attention.query_key_value.weight",
+                    "mlp.dense_h_to_4h.weight",
+
+                    "self_attention.query_key_value.bias",
+                    "mlp.dense_h_to_4h.bias",
+
+                    "word_embeddings.weight"
                 ]:
                     if name.endswith(suffix):
-                        tensor = tensor.transpose(1, 0).contiguous()
-                state_dict[full_name] = tensor
+                        slice_ = f.get_slice(name)
+                        if suffix in {
+                            "mlp.dense_4h_to_h.weight",
+                            "self_attention.dense.weight",
+                        }:
+                            size = slice_.get_shape()[1]
+                            block_size = size // tp_world_size
+                            start = tp_rank * block_size
+                            stop = (tp_rank + 1) * block_size
+                            tensor = slice_[:, start:stop]
+                        else:
+                            size = slice_.get_shape()[0]
+                            block_size = size // tp_world_size
+                            start = tp_rank * block_size
+                            stop = (tp_rank + 1) * block_size
+                            tensor = slice_[start:stop]
 
-            state_dict["lm_head.weight"] = f.get_tensor("word_embeddings.weight")
-    model.load_state_dict(state_dict)
-    model.tie_weights()
-    # TODO @thomasw21: HACK in order to transpose all weight prior
+                        if name.endswith(".weight") and not name.endswith("word_embeddings.weight"):
+                            tensor = tensor.transpose(1, 0)
+                        handled = True
+                        break
+                if not handled:
+                    tensor = f.get_tensor(name)
 
-    # if do_transpose:
-    #     state_dict[key] = state_dict[key].transpose(1, 0).contiguous()
+                tensor = tensor.contiguous()
 
+                if tp_rank != 0 and (name.endswith("self_attention.dense.bias") or name.endswith("mlp.dense_4h_to_h.bias")):
+                    # XXX: Hack for Rowlinear to add the bias only once.
+                    set_tensor(model, full_name, torch.zeros_like(tensor))
+                else:
+                    set_tensor(model, full_name, tensor)
+                if name == "word_embeddings.weight":
+                    set_tensor(model, "lm_head.weight", tensor)
+
+                if current_tensor.shape != tensor.shape:
+                    raise ValueError(f"Name {name} -- Current {current_tensor.shape} and got {tensor.shape}")
+
+    print_rank_0(f"State dict in {datetime.datetime.now() - start_time}")
     torch.distributed.barrier(group=process_group)
     model = model.eval()
     num_heads = config.n_head // process_group.size()
-    print_rank_0(f"Loaded model in {datetime.datetime.now() - start}")
+    print_rank_0(f"Loaded model in {datetime.datetime.now() - start_time}")
 
     if tp_rank == 0:
         r = redis.Redis(host="localhost", port=6379, db=0)
@@ -261,7 +305,7 @@ def main(args):
         p = r.pubsub()
         p.subscribe(["query"])
 
-    print(f"Ready in {datetime.datetime.now() - start}")
+    print(f"Ready in {datetime.datetime.now() - start_time}")
     torch.distributed.barrier(group=process_group)
     accumulating_text = tp_rank == 0  # only tp_rank=0 gets the test
     while True:
