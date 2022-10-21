@@ -5,6 +5,8 @@ import os
 import pickle
 from pathlib import Path
 import json
+from contextlib import contextmanager
+from safetensors import safe_open
 
 import torch
 import torch.backends
@@ -19,9 +21,9 @@ from transformers import (
     AutoConfig,
     LogitsProcessorList,
 )
+from huggingface_hub import HfApi, hf_hub_download
 from transformers.modeling_utils import no_init_weights
 
-from shard_model import prepare_weights, match_suffix
 from utils import unroll_parameters
 
 BATCH_SIZE = 32
@@ -86,8 +88,6 @@ def get_message(p, blocking: bool):
             return data
 
 
-
-
 def safe_receive(r, p, tokenizer, max_input_tokens, blocking=True):
     while True:
         message = get_message(p, blocking)
@@ -98,11 +98,7 @@ def safe_receive(r, p, tokenizer, max_input_tokens, blocking=True):
             print(f"Ignored prompt was incorrect {inputs}")
             r.publish(
                 topic,
-                pickle.dumps(
-                    {
-                        "error": f"This prompt is empty or invalid"
-                    }
-                ),
+                pickle.dumps({"error": f"This prompt is empty or invalid"}),
             )
             continue
         input_ids = tokenizer(inputs, return_tensors="pt")
@@ -121,8 +117,77 @@ def safe_receive(r, p, tokenizer, max_input_tokens, blocking=True):
         return topic, inputs, parameters
 
 
+def dl_weights(rank, model_id):
+    api = HfApi()
+    info = api.model_info(model_id)
+    filenames = set(
+        s.rfilename for s in info.siblings if s.rfilename.endswith(".safetensors")
+    )
+    return [hf_hub_download(model_id, filename=filename) for filename in filenames]
+
+
+@contextmanager
+def init_empty_weights(include_buffers: bool = False):
+    """
+    imported from `accelerate` to not depend on it.
+    """
+    old_register_parameter = torch.nn.Module.register_parameter
+    if include_buffers:
+        old_register_buffer = torch.nn.Module.register_buffer
+
+    def register_empty_parameter(module, name, param):
+        old_register_parameter(module, name, param)
+        if param is not None:
+            param_cls = type(module._parameters[name])
+            kwargs = module._parameters[name].__dict__
+            module._parameters[name] = param_cls(
+                module._parameters[name].to(torch.device("meta")), **kwargs
+            )
+
+    def register_empty_buffer(module, name, buffer):
+        old_register_buffer(module, name, buffer)
+        if buffer is not None:
+            module._buffers[name] = module._buffers[name].to(torch.device("meta"))
+
+    # Patch tensor creation
+    if include_buffers:
+        tensor_constructors_to_patch = {
+            torch_function_name: getattr(torch, torch_function_name)
+            for torch_function_name in ["empty", "zeros", "ones", "full"]
+        }
+    else:
+        tensor_constructors_to_patch = {}
+
+    def patch_tensor_constructor(fn):
+        def wrapper(*args, **kwargs):
+            kwargs["device"] = torch.device("meta")
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    try:
+        torch.nn.Module.register_parameter = register_empty_parameter
+        if include_buffers:
+            torch.nn.Module.register_buffer = register_empty_buffer
+        for torch_function_name in tensor_constructors_to_patch.keys():
+            setattr(
+                torch,
+                torch_function_name,
+                patch_tensor_constructor(getattr(torch, torch_function_name)),
+            )
+        yield
+    finally:
+        torch.nn.Module.register_parameter = old_register_parameter
+        if include_buffers:
+            torch.nn.Module.register_buffer = old_register_buffer
+        for (
+            torch_function_name,
+            old_torch_function,
+        ) in tensor_constructors_to_patch.items():
+            setattr(torch, torch_function_name, old_torch_function)
+
+
 def main(args):
-    shard_directory = args.save_path
     model_name = args.name
     dtype = torch.bfloat16
 
@@ -133,24 +198,10 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     print_rank_0("Loaded tokenizer!")
     start = datetime.datetime.now()
-    print_rank_0("Loading model")
-
+    print_rank_0("Ensures files on disk")
     # shard state_dict
-    if tp_rank == 0:
-        # TODO @thomasw21 do some caching
-        shard_state_dict_paths = prepare_weights(
-            model_name, Path(shard_directory), tp_world_size=tp_world_size
-        )
-        shard_state_dict_paths = [
-            str(path.absolute()) for path in shard_state_dict_paths
-        ]
-    else:
-        shard_state_dict_paths = [None] * tp_world_size
-
-    torch.distributed.broadcast_object_list(
-        shard_state_dict_paths, src=0, group=process_group
-    )
-    shard_state_dict_path = shard_state_dict_paths[tp_rank]
+    filenames = dl_weights(tp_rank, model_name)
+    torch.distributed.barrier(group=process_group)
 
     config = AutoConfig.from_pretrained(
         model_name, slow_but_exact=False, tp_parallel=True
@@ -167,33 +218,38 @@ def main(args):
     torch.backends.cudnn.allow_tf32 = True
 
     with set_default_dtype(dtype):
-        with no_init_weights():
+        with init_empty_weights():
             # we can probably set the device to `meta` here?
             model = AutoModelForCausalLM.from_config(config).to(dtype)
+    model = model.eval()
 
     torch.distributed.barrier(group=process_group)
-    print_rank_0(f"Initialized model")
-    state_dict = torch.load(shard_state_dict_path)
-    # TODO @thomasw21: HACK in order to transpose all weight prior
-    for key in state_dict.keys():
-        do_transpose = False
-        if not match_suffix(key, "weight"):
-            continue
+    print_rank_0("Initialized empty model")
+    state_dict = {}
+    for file in filenames:
+        with safe_open(file, framework="pt", device=f"cuda:{tp_rank}") as f:
+            for name in f.keys():
+                full_name = f"transformer.{name}"
+                # param = parameters[full_name]
+                tensor = f.get_tensor(name)
+                for suffix in [
+                    "self_attention.query_key_value.weight",
+                    "self_attention.dense.weight",
+                    "dense_h_to_4h.weight",
+                    "dense_4h_to_h.weight",
+                ]:
+                    if name.endswith(suffix):
+                        tensor = tensor.transpose(1, 0).contiguous()
+                state_dict[full_name] = tensor
 
-        for potential_suffix in [
-            "self_attention.query_key_value.weight",
-            "self_attention.dense.weight",
-            "dense_h_to_4h.weight",
-            "dense_4h_to_h.weight",
-        ]:
-            if match_suffix(key, potential_suffix):
-                do_transpose = True
-
-        if do_transpose:
-            state_dict[key] = state_dict[key].transpose(1, 0).contiguous()
-
+            state_dict["lm_head.weight"] = f.get_tensor("word_embeddings.weight")
     model.load_state_dict(state_dict)
-    model.to(device)
+    model.tie_weights()
+    # TODO @thomasw21: HACK in order to transpose all weight prior
+
+    # if do_transpose:
+    #     state_dict[key] = state_dict[key].transpose(1, 0).contiguous()
+
     torch.distributed.barrier(group=process_group)
     model = model.eval()
     num_heads = config.n_head // process_group.size()
@@ -212,10 +268,14 @@ def main(args):
         # Getting input
         torch.distributed.barrier(group=process_group)
         if tp_rank == 0:
-            items = [safe_receive(r, p, tokenizer, args.max_input_tokens, blocking=True)]
+            items = [
+                safe_receive(r, p, tokenizer, args.max_input_tokens, blocking=True)
+            ]
 
             while len(items) < BATCH_SIZE:
-                item = safe_receive(r, p, tokenizer, args.max_input_tokens, blocking=False)
+                item = safe_receive(
+                    r, p, tokenizer, args.max_input_tokens, blocking=False
+                )
                 if item is None:
                     break
                 items.append(item)
@@ -283,17 +343,14 @@ def main(args):
                         something_has_exited = True
                         if tp_rank == 0:
                             total_time = datetime.datetime.now() - start
-                            print(f"Generated {tokens} tokens in {total_time} ({total_time/tokens} / token)")
+                            print(
+                                f"Generated {tokens} tokens in {total_time} ({total_time/tokens} / token)"
+                            )
                             r.publish(topic, pickle.dumps({"output": output}))
                     else:
                         keep_ids.append(i)
                         keep_past_ids.extend(
-                            [
-                                j
-                                for j in range(
-                                    i * num_heads, (i + 1) * num_heads
-                                )
-                            ]
+                            [j for j in range(i * num_heads, (i + 1) * num_heads)]
                         )
                         next_input_ids.append(next_ids)
 
@@ -325,7 +382,6 @@ def main(args):
                 )
 
 
-
 if __name__ == "__main__":
     torch.manual_seed(0)
     from argparse import ArgumentParser
@@ -344,7 +400,6 @@ if __name__ == "__main__":
         type=int,
         help="Maximum prompt length (in tokens)",
     )
-    parser.add_argument("--save-path", required=True, type=str)
 
     args = parser.parse_args()
     main(args)
