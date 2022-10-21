@@ -5,6 +5,8 @@ import os
 import pickle
 from pathlib import Path
 import json
+from contextlib import contextmanager
+from safetensors import safe_open
 
 import torch
 import torch.backends
@@ -19,9 +21,15 @@ from transformers import (
     AutoConfig,
     LogitsProcessorList,
 )
+from transformers.models.bloom.parallel_layers import (
+    TensorParallelColumnLinear,
+    TensorParallelEmbedding,
+    TensorParallelRowLinear,
+)
+
+from huggingface_hub import HfApi, hf_hub_download
 from transformers.modeling_utils import no_init_weights
 
-from shard_model import prepare_weights, match_suffix
 from utils import unroll_parameters
 
 BATCH_SIZE = 32
@@ -86,8 +94,6 @@ def get_message(p, blocking: bool):
             return data
 
 
-
-
 def safe_receive(r, p, tokenizer, max_input_tokens, blocking=True):
     while True:
         message = get_message(p, blocking)
@@ -98,11 +104,7 @@ def safe_receive(r, p, tokenizer, max_input_tokens, blocking=True):
             print(f"Ignored prompt was incorrect {inputs}")
             r.publish(
                 topic,
-                pickle.dumps(
-                    {
-                        "error": f"This prompt is empty or invalid"
-                    }
-                ),
+                pickle.dumps({"error": f"This prompt is empty or invalid"}),
             )
             continue
         input_ids = tokenizer(inputs, return_tensors="pt")
@@ -121,8 +123,154 @@ def safe_receive(r, p, tokenizer, max_input_tokens, blocking=True):
         return topic, inputs, parameters
 
 
+def dl_weights(group, model_id):
+    rank = group.rank()
+    api = HfApi()
+    info = api.model_info(model_id)
+    filenames = [
+        s.rfilename for s in info.siblings if s.rfilename.endswith(".safetensors")
+    ]
+    # Download the files only on rank 0
+    if rank == 0:
+        # XXX: You might want to try and launch these in a multiprocessing.Pool to download the files faster.
+        [
+            hf_hub_download(model_id, filename=filename, local_files_only=True)
+            for filename in filenames
+        ]
+    else:
+        pass
+    torch.distributed.barrier(group=group)
+    # At this point the files should be in cache
+    return [
+        hf_hub_download(model_id, filename=filename, local_files_only=True)
+        for filename in filenames
+    ]
+
+
+@contextmanager
+def init_empty_weights(include_buffers: bool = False):
+    """
+    imported from `accelerate` to not depend on it.
+    """
+    old_register_parameter = torch.nn.Module.register_parameter
+    if include_buffers:
+        old_register_buffer = torch.nn.Module.register_buffer
+
+    def register_empty_parameter(module, name, param):
+        old_register_parameter(module, name, param)
+        if param is not None:
+            param_cls = type(module._parameters[name])
+            kwargs = module._parameters[name].__dict__
+            module._parameters[name] = param_cls(
+                module._parameters[name].to(torch.device("meta")), **kwargs
+            )
+
+    def register_empty_buffer(module, name, buffer):
+        old_register_buffer(module, name, buffer)
+        if buffer is not None:
+            module._buffers[name] = module._buffers[name].to(torch.device("meta"))
+
+    # Patch tensor creation
+    if include_buffers:
+        tensor_constructors_to_patch = {
+            torch_function_name: getattr(torch, torch_function_name)
+            for torch_function_name in ["empty", "zeros", "ones", "full"]
+        }
+    else:
+        tensor_constructors_to_patch = {}
+
+    def patch_tensor_constructor(fn):
+        def wrapper(*args, **kwargs):
+            kwargs["device"] = torch.device("meta")
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    try:
+        torch.nn.Module.register_parameter = register_empty_parameter
+        if include_buffers:
+            torch.nn.Module.register_buffer = register_empty_buffer
+        for torch_function_name in tensor_constructors_to_patch.keys():
+            setattr(
+                torch,
+                torch_function_name,
+                patch_tensor_constructor(getattr(torch, torch_function_name)),
+            )
+        yield
+    finally:
+        torch.nn.Module.register_parameter = old_register_parameter
+        if include_buffers:
+            torch.nn.Module.register_buffer = old_register_buffer
+        for (
+            torch_function_name,
+            old_torch_function,
+        ) in tensor_constructors_to_patch.items():
+            setattr(torch, torch_function_name, old_torch_function)
+
+
+def load(model, filenames, group):
+    tp_rank = group.rank()
+    tp_world_size = group.size()
+    parameters = dict(model.named_parameters())
+    for filename in filenames:
+        with safe_open(filename, framework="pt", device=f"cuda:{tp_rank}") as f:
+            for name in f.keys():
+                full_name = f"transformer.{name}"
+
+                module_name, param_name = full_name.rsplit(".", 1)
+                module = model.get_submodule(module_name)
+                current_tensor = parameters[full_name]
+
+                slice_ = f.get_slice(name)
+
+                if isinstance(module, TensorParallelColumnLinear):
+                    if param_name == "weight":
+                        size = slice_.get_shape()[0]
+                        block_size = size // tp_world_size
+                        start = tp_rank * block_size
+                        stop = (tp_rank + 1) * block_size
+                        tensor = slice_[start:stop]
+                        tensor = tensor.transpose(1, 0)
+                    else:
+                        size = slice_.get_shape()[0]
+                        block_size = size // tp_world_size
+                        start = tp_rank * block_size
+                        stop = (tp_rank + 1) * block_size
+                        tensor = slice_[start:stop]
+                elif isinstance(module, TensorParallelRowLinear):
+                    if param_name == "weight":
+                        size = slice_.get_shape()[1]
+                        block_size = size // tp_world_size
+                        start = tp_rank * block_size
+                        stop = (tp_rank + 1) * block_size
+                        tensor = slice_[:, start:stop]
+                        tensor = tensor.transpose(1, 0)
+                    else:
+                        tensor = slice_[:]
+                        # XXX: Hack for Rowlinear to add the bias only once.
+                        if tp_rank != 0:
+                            tensor = torch.zeros_like(tensor)
+                elif isinstance(module, TensorParallelEmbedding):
+                    size = slice_.get_shape()[0]
+                    block_size = size // tp_world_size
+                    start = tp_rank * block_size
+                    stop = (tp_rank + 1) * block_size
+                    tensor = slice_[start:stop]
+                else:
+                    tensor = slice_[:]
+
+                if current_tensor.shape != tensor.shape:
+                    raise ValueError(
+                        f"Name {name} -- Current {current_tensor.shape} and got {tensor.shape}"
+                    )
+
+                tensor = tensor.contiguous()
+                module._parameters[param_name] = tensor
+                if name == "word_embeddings.weight":
+                    model.lm_head._parameters["weight"] = tensor
+
+
 def main(args):
-    shard_directory = args.save_path
     model_name = args.name
     dtype = torch.bfloat16
 
@@ -132,25 +280,11 @@ def main(args):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
     print_rank_0("Loaded tokenizer!")
-    start = datetime.datetime.now()
-    print_rank_0("Loading model")
-
+    start_time = datetime.datetime.now()
+    print_rank_0("Ensures files on disk")
     # shard state_dict
-    if tp_rank == 0:
-        # TODO @thomasw21 do some caching
-        shard_state_dict_paths = prepare_weights(
-            model_name, Path(shard_directory), tp_world_size=tp_world_size
-        )
-        shard_state_dict_paths = [
-            str(path.absolute()) for path in shard_state_dict_paths
-        ]
-    else:
-        shard_state_dict_paths = [None] * tp_world_size
-
-    torch.distributed.broadcast_object_list(
-        shard_state_dict_paths, src=0, group=process_group
-    )
-    shard_state_dict_path = shard_state_dict_paths[tp_rank]
+    filenames = dl_weights(process_group, model_name)
+    torch.distributed.barrier(group=process_group)
 
     config = AutoConfig.from_pretrained(
         model_name, slow_but_exact=False, tp_parallel=True
@@ -166,38 +300,23 @@ def main(args):
     # The flag below controls whether to allow TF32 on cuDNN. This flag defaults to True.
     torch.backends.cudnn.allow_tf32 = True
 
+    config.tp_parallel = True
     with set_default_dtype(dtype):
-        with no_init_weights():
+        with init_empty_weights():
             # we can probably set the device to `meta` here?
             model = AutoModelForCausalLM.from_config(config).to(dtype)
+    model = model.eval()
 
     torch.distributed.barrier(group=process_group)
-    print_rank_0(f"Initialized model")
-    state_dict = torch.load(shard_state_dict_path)
-    # TODO @thomasw21: HACK in order to transpose all weight prior
-    for key in state_dict.keys():
-        do_transpose = False
-        if not match_suffix(key, "weight"):
-            continue
+    print_rank_0("Initialized empty model")
 
-        for potential_suffix in [
-            "self_attention.query_key_value.weight",
-            "self_attention.dense.weight",
-            "dense_h_to_4h.weight",
-            "dense_4h_to_h.weight",
-        ]:
-            if match_suffix(key, potential_suffix):
-                do_transpose = True
+    load(model, filenames, process_group)
 
-        if do_transpose:
-            state_dict[key] = state_dict[key].transpose(1, 0).contiguous()
-
-    model.load_state_dict(state_dict)
-    model.to(device)
+    print_rank_0(f"State dict in {datetime.datetime.now() - start_time}")
     torch.distributed.barrier(group=process_group)
     model = model.eval()
     num_heads = config.n_head // process_group.size()
-    print_rank_0(f"Loaded model in {datetime.datetime.now() - start}")
+    print_rank_0(f"Loaded model in {datetime.datetime.now() - start_time}")
 
     if tp_rank == 0:
         r = redis.Redis(host="localhost", port=6379, db=0)
@@ -205,17 +324,21 @@ def main(args):
         p = r.pubsub()
         p.subscribe(["query"])
 
-    print(f"Ready in {datetime.datetime.now() - start}")
+    print(f"Ready in {datetime.datetime.now() - start_time}")
     torch.distributed.barrier(group=process_group)
     accumulating_text = tp_rank == 0  # only tp_rank=0 gets the test
     while True:
         # Getting input
         torch.distributed.barrier(group=process_group)
         if tp_rank == 0:
-            items = [safe_receive(r, p, tokenizer, args.max_input_tokens, blocking=True)]
+            items = [
+                safe_receive(r, p, tokenizer, args.max_input_tokens, blocking=True)
+            ]
 
             while len(items) < BATCH_SIZE:
-                item = safe_receive(r, p, tokenizer, args.max_input_tokens, blocking=False)
+                item = safe_receive(
+                    r, p, tokenizer, args.max_input_tokens, blocking=False
+                )
                 if item is None:
                     break
                 items.append(item)
@@ -283,17 +406,14 @@ def main(args):
                         something_has_exited = True
                         if tp_rank == 0:
                             total_time = datetime.datetime.now() - start
-                            print(f"Generated {tokens} tokens in {total_time} ({total_time/tokens} / token)")
+                            print(
+                                f"Generated {tokens} tokens in {total_time} ({total_time/tokens} / token)"
+                            )
                             r.publish(topic, pickle.dumps({"output": output}))
                     else:
                         keep_ids.append(i)
                         keep_past_ids.extend(
-                            [
-                                j
-                                for j in range(
-                                    i * num_heads, (i + 1) * num_heads
-                                )
-                            ]
+                            [j for j in range(i * num_heads, (i + 1) * num_heads)]
                         )
                         next_input_ids.append(next_ids)
 
@@ -325,7 +445,6 @@ def main(args):
                 )
 
 
-
 if __name__ == "__main__":
     torch.manual_seed(0)
     from argparse import ArgumentParser
@@ -344,7 +463,6 @@ if __name__ == "__main__":
         type=int,
         help="Maximum prompt length (in tokens)",
     )
-    parser.add_argument("--save-path", required=True, type=str)
 
     args = parser.parse_args()
     main(args)
