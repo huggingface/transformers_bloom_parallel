@@ -127,13 +127,12 @@ def safe_receive(r, p, tokenizer, max_input_tokens, blocking=True):
         return topic, inputs, parameters
 
 def dl_weights(rank, model_id):
-    revision = "refs/pr/121"
     api = HfApi()
-    info = api.model_info(model_id, revision=revision)
+    info = api.model_info(model_id)
     filenames = set(
         s.rfilename for s in info.siblings if s.rfilename.endswith(".safetensors")
     )
-    return [hf_hub_download(model_id, filename=filename, revision=revision) for filename in filenames]
+    return [hf_hub_download(model_id, filename=filename) for filename in filenames]
 
 
 @contextmanager
