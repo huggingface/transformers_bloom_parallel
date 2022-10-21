@@ -267,7 +267,7 @@ def load(model, filenames, group):
                 tensor = tensor.contiguous()
                 module._parameters[param_name] = tensor
                 if name == "word_embeddings.weight":
-                    module._parameters["lm_head.weight"] = tensor
+                    model.lm_head._parameters["weight"] = tensor
 
 
 def main(args):
